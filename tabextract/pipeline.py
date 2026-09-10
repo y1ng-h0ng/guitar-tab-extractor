@@ -75,6 +75,7 @@ def run_pipeline(
     region=None,
     bars_per_row=4,
     polarity="auto",
+    generate_report=False,
     cancel_event=None,
 ):
     validate_options(sample_fps, dpi, bars_per_row)
@@ -159,9 +160,7 @@ def run_pipeline(
         and s["end"] < view_info[-1]["end_seconds"]
         for s in skipped
     ):
-        result.warnings.append(
-            "视频中间存在未提取的片段，详见报告的 skipped_segments，请对照原片检查。"
-        )
+        result.warnings.append("视频中间存在未提取的片段，请对照原片检查。")
     for warning in result.warnings:
         log("待核对: " + warning)
     full = stack_rows(result.rows)
@@ -182,7 +181,7 @@ def run_pipeline(
         result.warnings,
         cancel_event,
     )
-    report_path = out.with_suffix(".report.json")
+    report_path = out.with_suffix(".report.json") if generate_report else None
     summary = {
         "source_video": source.name,
         "region": list(region),
@@ -199,7 +198,7 @@ def run_pipeline(
         "score_rows": len(result.rows),
         "stitched_size": list(full.shape),
         "output_pdf": str(out),
-        "report_path": str(report_path),
+        "report_path": str(report_path) if report_path else None,
         "warnings": result.warnings,
         "source_views": view_info,
         "skipped_segments": skipped,
@@ -210,7 +209,8 @@ def run_pipeline(
         "pdf_layout": layouts,
         "note": "小节数由图像边界推定，未进行音高或节奏的语义识别；源视频未显示的内容不会补写。",
     }
-    _save_json(report_path, summary)
+    if report_path:
+        _save_json(report_path, summary)
     progress(
         100,
         f"完成: {len(layouts)} 页 PDF，{len(result.rows)} 行谱表；待核对 {len(result.warnings)} 项",
