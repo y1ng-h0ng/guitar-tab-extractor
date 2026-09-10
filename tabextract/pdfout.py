@@ -11,7 +11,76 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen.canvas import Canvas
+from .geometry import staff_groups, bar_lines
 from .support import check_cancel
+
+
+def _add_final_barline(row):
+    """Turn the last confirmed measure boundary into a thin+thick final barline.
+
+    If the six staff lines continue substantially past the last detected bar,
+    the source likely ends with a partially visible measure; in that case the
+    image is left unchanged rather than inventing a musical ending.
+    """
+    page = row.copy()
+    groups = staff_groups(page)
+    if len(groups) != 1:
+        return page
+
+    lines = groups[0]
+    bars = bar_lines(page, lines)
+    if not bars:
+        return page
+
+    space = float(np.median(np.diff(lines)))
+    x = int(bars[-1])
+
+    # A complete final measure should stop at its right barline. If all six
+    # strings visibly continue well beyond it, this is probably the left edge
+    # of an incomplete tail and must not be decorated as a final boundary.
+    probe = min(page.shape[1], x + max(2, round(space * 0.35)))
+    support = []
+    for y in lines:
+        yy = int(round(y))
+        strip = page[max(0, yy - 1) : min(page.shape[0], yy + 2), probe:]
+        support.append(int((strip < 180).any(axis=0).sum()) if strip.size else 0)
+    if support and min(support) > space * 1.5:
+        return page
+
+    thin = max(1, round(space * 0.10))
+    gap = max(2, round(space * 0.20))
+    thick = max(2, round(space * 0.30))
+    line_band = max(1, round(space * 0.06))
+
+    thin_left = max(0, x - thin // 2)
+    thin_right = thin_left + thin
+    thick_left = thin_right + gap
+    thick_right = thick_left + thick
+    padding = max(2, round(space * 0.35))
+    required_width = thick_right + padding
+    if required_width > page.shape[1]:
+        page = np.pad(
+            page,
+            ((0, 0), (0, required_width - page.shape[1])),
+            constant_values=255,
+        )
+
+    top = max(0, int(round(lines[0])))
+    bottom = min(page.shape[0] - 1, int(round(lines[-1])))
+
+    # Redraw the existing final boundary as a clear thin line.
+    page[top : bottom + 1, thin_left:thin_right] = 0
+
+    # Continue the six strings through the small gap up to the heavy bar.
+    for y in lines:
+        yy = int(round(y))
+        a = max(0, yy - line_band)
+        b = min(page.shape[0], yy + line_band + 1)
+        page[a:b, x:thick_right] = 0
+
+    # Heavy line on the right: conventional final-barline appearance.
+    page[top : bottom + 1, thick_left:thick_right] = 0
+    return page
 
 
 def layout_rows(rows, staff_spacing=21.0):
@@ -74,6 +143,8 @@ def export_rows(rows, out_path, dpi=300, staff_spacing=21.0, title="吉他谱", 
         raise ValueError("没有可导出的谱表")
     if not 72 <= dpi <= 600:
         raise ValueError("DPI 必须在 72 到 600 之间")
+    rows = list(rows)
+    rows[-1] = _add_final_barline(rows[-1])
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     layouts = layout_rows(rows, staff_spacing)
