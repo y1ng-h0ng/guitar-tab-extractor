@@ -81,7 +81,7 @@ class App:
         self.events = queue.Queue(); self.worker = None; self.cancel_event = threading.Event(); self.closing = False
         self.region = None; self.region_source = None; self.summary = None; self.preview_path = None
         self.video = tk.StringVar(); self.output = tk.StringVar(); self.fps = tk.StringVar(value="6"); self.dpi = tk.StringVar(value="300"); self.bars = tk.StringVar(value="4")
-        self.color = tk.StringVar(value="自动识别"); self.debug = tk.BooleanVar(value=True)
+        self.color = tk.StringVar(value="自动识别"); self.debug = tk.BooleanVar(value=False); self.report = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="选择视频即可开始；也可以先预览谱面范围。"); self.region_text = tk.StringVar(value="自动定位谱面")
         frame = ttk.Frame(root, padding=18); frame.pack(fill="both", expand=True); frame.columnconfigure(1, weight=1); frame.rowconfigure(8, weight=1)
         ttk.Label(frame, text="从演示视频整理吉他谱", font=("Microsoft YaHei UI", 17, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 16))
@@ -94,7 +94,9 @@ class App:
         for label, var, width in [("每行目标小节", self.bars, 3), ("采样 fps", self.fps, 4), ("DPI", self.dpi, 5)]:
             ttk.Label(opts, text=label).pack(side="left", padx=(0, 5)); ttk.Entry(opts, textvariable=var, width=width).pack(side="left", padx=(0, 14))
         ttk.Combobox(opts, textvariable=self.color, values=list(COLORS), state="readonly", width=14).pack(side="left")
-        ttk.Checkbutton(frame, text="保存过程截图，便于检查符干、连音线和小节边界", variable=self.debug).grid(row=5, column=0, columnspan=3, sticky="w", pady=7)
+        extras = ttk.Frame(frame); extras.grid(row=5, column=0, columnspan=3, sticky="w", pady=7)
+        ttk.Checkbutton(extras, text="保存过程截图", variable=self.debug).pack(side="left")
+        ttk.Checkbutton(extras, text="生成报告文件 (.report.json)", variable=self.report).pack(side="left", padx=(18, 0))
         actions = ttk.Frame(frame); actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=10)
         self.run_btn = ttk.Button(actions, text="开始提取", command=self.start); self.run_btn.pack(side="left")
         self.cancel_btn = ttk.Button(actions, text="取消", command=self.cancel, state="disabled"); self.cancel_btn.pack(side="left", padx=8)
@@ -163,11 +165,12 @@ class App:
             out = self.output.get().strip() or os.path.splitext(video)[0] + "_吉他谱.pdf"; self.output.set(out)
             region = self.region if self.region_source == video else None; polarity = COLORS[self.color.get()]
             debug = str(Path(out).parent / ("debug_" + Path(video).stem)) if self.debug.get() else None
+            generate_report = self.report.get()
         except (ValueError, KeyError) as error: messagebox.showerror("检查设置", str(error)); return
         self.summary = None; self.open_btn.config(state="disabled"); self.report_btn.config(state="disabled"); self.progress["value"] = 0
         self.log_text.config(state="normal"); self.log_text.delete("1.0", "end"); self.log_text.config(state="disabled")
         def task():
-            summary = run_pipeline(video, out, sample_fps=fps, dpi=dpi, bars_per_row=bars, region=region, polarity=polarity, debug_dir=debug, cancel_event=self.cancel_event, log=lambda msg: self.events.put(("log", msg)), progress_cb=lambda pct, msg: self.events.put(("progress", (pct, msg))))
+            summary = run_pipeline(video, out, sample_fps=fps, dpi=dpi, bars_per_row=bars, region=region, polarity=polarity, debug_dir=debug, generate_report=generate_report, cancel_event=self.cancel_event, log=lambda msg: self.events.put(("log", msg)), progress_cb=lambda pct, msg: self.events.put(("progress", (pct, msg))))
             self.events.put(("done", summary))
         self.launch(task)
 
@@ -214,8 +217,9 @@ class App:
         if r.get("rows"): text += "各行小节数：" + " / ".join(str(row["units"]) for row in r["rows"]) + "\n"
         if "crossing_marks" in r:
             marks = r["crossing_marks"]; kept = sum(mark["kept_on_same_row"] for mark in marks); text += f"跨小节连线：检测到 {len(marks)} 处，其中 {kept} 处保持同行。\n\n"
-        text += "待核对内容：\n" + ("\n".join(r["warnings"]) if r["warnings"] else "未发现接缝或边界异常。建议对照过程截图核对细小技巧标记。")
-        text += f"\n\nPDF：{r['output_pdf']}\n详细报告：{r['report_path']}"
+        text += "待核对内容：\n" + ("\n".join(r["warnings"]) if r["warnings"] else "未发现接缝或边界异常。建议必要时对照原视频核对细小技巧标记。")
+        report_text = r.get("report_path") or "未生成（勾选“生成报告文件”后会保存 .report.json）"
+        text += f"\n\nPDF：{r['output_pdf']}\n详细报告：{report_text}"
         box.insert("1.0", text); box.config(state="disabled")
 
     def close(self):
