@@ -161,9 +161,12 @@ def export_rows(rows, out_path, dpi=300, staff_spacing=21.0, title="吉他谱", 
             for item in placements:
                 check_cancel(cancel_event)
                 raster = Image.fromarray(rows[item["row"]]).convert("L")
-                target = (max(1, round(item["width"] / 72 * dpi)), max(1, round(item["height"] / 72 * dpi)))
-                if raster.size != target:
-                    raster = raster.resize(target, Image.Resampling.LANCZOS)
+                # DPI is a minimum. Downsampling a dense row discards small
+                # technique labels and thin stem edges that survived cleanup.
+                target_w = max(raster.width, round(item["width"] / 72 * dpi))
+                if target_w > raster.width:
+                    target_h = max(1, round(raster.height * target_w / raster.width))
+                    raster = raster.resize((target_w, target_h), Image.Resampling.LANCZOS)
                 canvas.drawImage(ImageReader(raster), item["x"], item["y"], item["width"], item["height"], mask=None)
             canvas.setFont("Helvetica", 8)
             canvas.setFillColorRGB(0.45, 0.45, 0.45)
