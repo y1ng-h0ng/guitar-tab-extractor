@@ -11,29 +11,38 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen.canvas import Canvas
-from .geometry import staff_groups, bar_lines
+from .geometry import staff_groups
 from .support import check_cancel
 
 
 def _add_final_barline(row):
-    """Turn the last detected measure boundary into a thin+thick final barline."""
+    """Add a conventional thin+thick final barline at the end of the last row."""
     page = row.copy()
     groups = staff_groups(page)
     if len(groups) != 1:
         return page
 
     lines = groups[0]
-    bars = bar_lines(page, lines)
-    if not bars:
-        return page
-
     space = float(np.median(np.diff(lines)))
-    x = int(bars[-1])
+    line_band = max(1, round(space * 0.06))
+
+    # Find where the six observed strings actually end. Requiring support on
+    # several strings prevents a trailing note stem or label from defining the
+    # musical right edge when the source video stops before showing a final bar.
+    support = np.zeros(page.shape[1], dtype=np.uint8)
+    for y in lines:
+        yy = int(round(y))
+        a = max(0, yy - line_band)
+        b = min(page.shape[0], yy + line_band + 1)
+        support += (page[a:b] < 180).any(axis=0).astype(np.uint8)
+    edge = np.where(support >= 4)[0]
+    if not edge.size:
+        return page
+    x = int(edge[-1])
+
     thin = max(1, round(space * 0.10))
     gap = max(2, round(space * 0.20))
     thick = max(2, round(space * 0.30))
-    line_band = max(1, round(space * 0.06))
-
     thin_left = max(0, x - thin // 2)
     thin_right = thin_left + thin
     thick_left = thin_right + gap
@@ -49,7 +58,6 @@ def _add_final_barline(row):
 
     top = max(0, int(round(lines[0])))
     bottom = min(page.shape[0] - 1, int(round(lines[-1])))
-
     page[top : bottom + 1, thin_left:thin_right] = 0
     for y in lines:
         yy = int(round(y))
