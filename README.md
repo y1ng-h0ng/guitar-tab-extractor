@@ -23,6 +23,7 @@ Guitar Tab Video Extractor 尝试把这套过程自动化，将视频中的已�
 - 📏 **Measure-aware layout** — 根据小节线重新分行，而不是机械裁图
 - 🔗 **Tie/slur protection** — 尽量避免把跨小节连线拆到两行
 - 🖼️ **Preserves the original score image** — 保留原谱面的数字、符干、技巧标记和连线，不重新 OCR 排字
+- 🏁 **Final barline** — 在整首谱最后一个小节补上“细线 + 粗线”终止线
 - 📄 **Printable A4 output** — 自动缩放、分页并生成 A4 PDF
 - 🔒 **Local processing** — 视频和谱面均在本地处理，不需要大模型 API
 
@@ -38,7 +39,7 @@ Guitar Tab Video Extractor 尝试把这套过程自动化，将视频中的已�
 2. 安装 **Python 3.10+**，建议 Python 3.12，并确保安装 Tcl/Tk 和 pip。
 3. 第一次运行时双击 `install_windows.bat` 安装依赖。
 4. 双击 `launch_windows.bat` 启动图形界面。
-5. 选择视频和 PDF 输出位置，点击“开始提取”。
+5. 选择视频和 PDF 输出位置，点击“开始提取”。“保存过程截图”和“生成报告文件”默认均关闭，需要时再勾选。
 
 如果已经配置好 Python 环境：
 
@@ -66,7 +67,7 @@ python gui.py
   ↓
 检测小节线与跨小节连线
   ↓
-重新分行并排版为 A4 PDF
+重新分行、补终止线并排版为 A4 PDF
 ```
 
 项目直接从视频画面中提取和拼接已有谱面，不使用大模型 API，也不通过音频重新转谱。
@@ -98,11 +99,16 @@ python gui.py
 
 ## Output / 输出内容
 
-程序主要生成以下内容：
+默认设置下，程序只生成：
 
-- `视频名_吉他谱.pdf`：整理后的 A4 吉他谱 PDF
-- `视频名_吉他谱.report.json`：页面、接缝、小节边界和待核对项等处理信息
-- `debug_视频名/`：开启过程截图后保存谱面区域、清洗结果、分行图和拼接长图等中间结果
+- `视频名_吉他谱.pdf`：整理后的 A4 吉他谱 PDF；最后一个小节会补上标准终止线
+
+下面两类输出均为可选项，GUI 默认不勾选：
+
+- `视频名_吉他谱.report.json`：勾选“生成报告文件”后生成，记录页面、接缝、小节边界、排版和待核对项等处理信息
+- `debug_视频名/`：勾选“保存过程截图”后生成，保存谱面区域、清洗结果、分行图和拼接长图等中间结果
+
+即使不生成 `.report.json`，本次运行的检查结果仍可在 GUI 的“查看检查结果”中查看。
 
 如果同名 PDF 已存在，只有在新文件成功生成后才会替换。处理失败或取消时不会留下被截断的半成品 PDF。
 
@@ -118,6 +124,7 @@ python gui.py
 - 根据小节线切分连续谱面，并尽量在合适的小节边界换行
 - 检测跨小节的连线，排版时尽量避免把连音关系拆到两行
 - 在安全空白区域调整行宽，不直接横向拉伸音符或技巧标记
+- 在最终谱面的最后一个小节补上细线 + 粗线组成的终止线
 - 将完整谱表行排版到 A4 页面中，并自动处理缩放、页边距和分页
 - 支持中文路径、处理取消、参数检查和跨平台文件打开
 
@@ -136,7 +143,7 @@ python gui.py
 
 图像处理无法恢复视频画面之外、严重模糊或被遮挡的内容。非常细小的技巧符号也会受到源视频清晰度限制。少量与谱面形态相似且长期静止的背景纹理可能被保留下来。
 
-当页面匹配或小节边界不确定时，程序倾向于保留内容并在报告中提示，而不是静默删除可能属于乐谱的部分。
+当页面匹配或小节边界不确定时，程序倾向于保留内容并在检查结果中提示，而不是静默删除可能属于乐谱的部分；如果启用了报告文件，这些信息也会写入 `.report.json`。
 
 “每行目标小节数”是排版目标而不是绝对限制。如果某处存在跨小节连线，程序可能允许相邻行的小节数量发生少量变化，以尽量保持连线两端位于同一行。
 
@@ -148,6 +155,7 @@ python gui.py
 python main.py "视频.mp4"
 python main.py "视频.mp4" -o "输出.pdf"
 python main.py "视频.mp4" --dpi 300 --bars-per-row 4 --sample-fps 6
+python main.py "视频.mp4" --report
 python main.py "视频.mp4" --debug-dir debug
 python main.py "视频.mp4" --region X Y W H --polarity bright
 ```
@@ -158,7 +166,8 @@ python main.py "视频.mp4" --region X Y W H --polarity bright
 - `--sample-fps`：设置翻页检测采样频率
 - `--dpi`：设置 PDF 输出 DPI
 - `--bars-per-row`：设置每行目标小节数
-- `--debug-dir`：保存中间处理结果
+- `--report`：额外生成 `.report.json` 检查报告；默认不生成
+- `--debug-dir`：保存中间处理截图；不指定时默认不保存
 - `--region`：手动指定谱面区域
 - `--polarity`：指定谱面明暗类型
 
@@ -182,7 +191,7 @@ tabextract/
 ├── geometry.py             谱线和小节线检测
 ├── stitch.py               相邻页面匹配与拼接
 ├── rowlayout.py            小节分行、连线保护和行宽处理
-├── pdfout.py               A4 PDF 排版输出
+├── pdfout.py               A4 PDF 排版输出与终止线
 ├── pipeline.py             完整处理流程
 └── support.py              通用辅助功能
 ```
