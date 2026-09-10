@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Generated outputs and debug artifacts
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.flv
+*.wmv
+*.m4v
+*_吉他谱.pdf
+*_吉他谱.report.json
+debug_*/
+output/
+
+# Local secrets / environment
+.env
+.env.*
+*.pem
+*.key
