@@ -44,12 +44,38 @@ def _cosine(a, b):
     return float((a * b).sum() / denom) if denom > 1e-6 else 0.0
 
 
+def _bar_labels_consistent(a, b, lines, shift):
+    """Repeated music is not overlap when observed measure labels disagree.
+
+    Compare label strokes without OCR. Missing/blank labels provide no veto;
+    clearly different labels make a destructive overlap cut unsafe.
+    """
+    space = float(np.median(np.diff(lines)))
+    top = max(0, round(lines[0] - space * 1.15))
+    bottom = max(top + 1, round(lines[0] - space * 0.2))
+    radius = max(1, round(space * 0.8))
+    aa, bb = bar_lines(a, lines), bar_lines(b, lines)
+    for x in aa:
+        for y in bb:
+            if abs(x - y - shift) > max(3, space * 0.2):
+                continue
+            if min(x, y) < radius or x + radius > a.shape[1] or y + radius > b.shape[1]:
+                continue
+            pa = (255 - a[top:bottom, x - radius:x + radius]).astype(np.float32)
+            pb = (255 - b[top:bottom, y - radius:y + radius]).astype(np.float32)
+            if min(np.count_nonzero(pa > 75), np.count_nonzero(pb > 75)) < space * space * 0.06:
+                continue
+            if _cosine(pa, pb) < 0.8:
+                return False
+    return True
+
+
 def find_horizontal_shift(a, b, lines):
     if a.shape != b.shape:
         return None
     fa, fb = _feature(a, lines), _feature(b, lines)
     same = _cosine(fa, fb)
-    if same > 0.998:
+    if same > 0.998 and _bar_labels_consistent(a, b, lines, 0):
         return {"shift": 0, "score": same, "overlap_score": same, "duplicate": True}
     width = a.shape[1]
     factor = max(1, round(width / 1280))
@@ -72,7 +98,7 @@ def find_horizontal_shift(a, b, lines):
             match = _cosine(fa[:, dx : dx + ov], fb[:, :ov])
             if best is None or match > best[1]:
                 best = (dx, match)
-        if best and best[1] > 0.72:
+        if best and best[1] > 0.72 and _bar_labels_consistent(a, b, lines, best[0]):
             candidates.append({"shift": best[0], "score": score, "overlap_score": best[1], "duplicate": False})
         win = max(12, round(sa.shape[1] * 0.07))
         work[max(0, pos - win) : pos + win + 1] = -1
@@ -199,7 +225,16 @@ def _measure_units(image, result, run_index):
     for y in lines:
         yy = round(y)
         row_support.append(int((tail[max(0, yy - 1) : yy + 2, far:] < 180).any(axis=0).sum()))
-    if row_support and min(row_support) > space * 2:
+    # A narrow visible tail can contain a complete note even when fewer than
+    # two spaces of staff remain. Never use staff length alone to discard it.
+    detail = (tail < 180).astype(np.uint8)
+    detail[:max(0, round(lines[0] - space * 0.2))] = 0
+    detail[:, :guard + max(2, round(space * 0.2))] = 0
+    radius = max(1, round(space * 0.13))
+    for y in lines:
+        yy = round(y)
+        detail[max(0, yy - radius):yy + radius + 1] = 0
+    if (row_support and min(row_support) > space * 2) or detail.any():
         units.append((tail, False, max(0, bars[-1] - guard), image.shape[1], bars[-1], None))
         result.warnings.append(f"片段 {run_index + 1} 的末尾小节右侧边界未在画面内确认，保留可见部分，请对照原视频。")
     return units

@@ -14,6 +14,31 @@ from tabextract.geometry import staff_groups
 
 
 class DetailPreservationTests(unittest.TestCase):
+    def test_large_score_keeps_thick_beams_and_single_note_flags(self):
+        for polarity in ("bright", "dark"):
+            with self.subTest(polarity=polarity):
+                gray = np.full((245, 640), 25, np.uint8)
+                for y in range(65, 166, 20):
+                    cv2.line(gray, (10, y), (630, y), 230, 2)
+                rhythm = np.zeros_like(gray)
+                for x in (110, 180, 260):
+                    cv2.line(rhythm, (x, 160), (x, 215), 230, 2)
+                cv2.line(rhythm, (110, 215), (180, 215), 230, 5)
+                cv2.polylines(rhythm, [np.array([[260, 215], [273, 207],
+                                               [276, 197], [270, 189]])],
+                              False, 230, 4)
+                gray = np.maximum(gray, rhythm)
+                if polarity == "dark":
+                    gray = 255 - gray
+                frames = [cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)] * 12
+                page = clean_frames(frames, polarity)
+                out = cv2.resize(page, (640, 245), interpolation=cv2.INTER_AREA)
+                for x0, y0, x1, y1 in [(120, 212, 170, 219), (265, 185, 280, 214)]:
+                    target = rhythm[y0:y1, x0:x1] > 140
+                    kept = out[y0:y1, x0:x1] < 180
+                    self.assertGreater(float((target & kept).sum() / target.sum()), 0.95)
+                self.assertEqual(len(staff_groups(page)), 1)
+
     def test_temporarily_occluded_fret_numbers_chords_and_dots_survive(self):
         for polarity in ("bright", "dark"):
             with self.subTest(polarity=polarity):
