@@ -38,9 +38,8 @@ def infer_polarity(bgr):
 def _restore_stem_evidence(page, low, median, high, groups, upscale):
     """Recover observed vertical strokes briefly hidden by footage/playheads.
 
-    The normal 25th-percentile veto can erase a stem when only a quarter of
-    the samples cover it. Relax that veto only for long vertical strokes seen
-    in a majority of frames. Every restored pixel still needs source evidence;
+    Relax the normal 60%-support requirement slightly for long vertical
+    strokes seen in a majority of frames. Every restored pixel needs evidence;
     no geometric line is drawn across an empty gap in the original notation.
     """
     evidence = ((median >= 8) & (high >= 25)).astype(np.uint8)
@@ -80,13 +79,23 @@ def _sharpen_annotations(page, low, high, groups, upscale):
     )
     small = np.zeros(count, bool)
     for i in range(1, count):
-        _, y, width, height, _ = stats[i]
+        x, y, width, height, _ = stats[i]
         for lines in groups:
             space = float(np.median(np.diff(lines)))
             if (lines[0] - 4 * space <= y
                     and y + height < lines[0] - 0.15 * space
                     and height <= 1.3 * space and width <= 3 * space):
-                small[i] = True
+                region = np.s_[y:y + height, x:x + width]
+                component = labels[region] == i
+                # Fixed contrast scaling can almost erase a faint label or a
+                # small note above the top string. Only refine strong glyphs,
+                # and fall back if too much of their visible ink would vanish.
+                if np.percentile(high[region][component], 90) < 80:
+                    break
+                original_ink = np.count_nonzero(page[region][component] < 180)
+                refined_ink = np.count_nonzero(refined[region][component] < 180)
+                if refined_ink >= max(1, original_ink * 0.6):
+                    small[i] = True
                 break
     mask = small[labels]
     page[mask] = refined[mask]
@@ -108,10 +117,21 @@ def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None):
         )
         features.append(stroke_response(image, polarity, kernel=3 * upscale))
     stack = np.stack(features)
-    low, median, high = np.percentile(stack, [25, 50, 75], axis=0)
+    # Strong strokes need support in 60% of samples, not 75%: the old hard
+    # veto could delete an ENTIRE fret number during a brief occlusion. Keep
+    # the stricter consensus for faint texture so the relaxed rule does not
+    # promote moving background details into apparent musical symbols.
+    low, supported, median, high = np.percentile(stack, [25, 40, 50, 75], axis=0)
     del stack, features
     alpha = np.clip((high - 8) * (255 / 35), 0, 255)
-    alpha[low < 10] = 0
+    strong = (low < 10) & (supported >= 10) & (high >= 60)
+    nearby = cv2.dilate(
+        strong.astype(np.uint8), np.ones((2 * upscale + 1, 2 * upscale + 1), np.uint8)
+    ) > 0
+    # Keep the antialiased fringe of a recovered glyph, but do not seed new
+    # symbols from weak background texture or from a nearby persistent string.
+    valid = (low >= 10) | (nearby & (supported >= 10) & (high >= 20))
+    alpha[~valid] = 0
     page = 255 - alpha.astype(np.uint8)
     # Accept faint pixels only within evidenced horizontal line bands.
     groups = staff_groups(page)
@@ -126,7 +146,7 @@ def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None):
             )
     if groups:
         _restore_stem_evidence(page, low, median, high, groups, upscale)
-        _sharpen_annotations(page, low, high, groups, upscale)
+        _sharpen_annotations(page, supported, high, groups, upscale)
         # Remove detached scenery far from all staff systems. Components touching
         # the notation envelope are kept WHOLE, even when stems extend below it.
         zone = np.zeros(page.shape[0], bool)

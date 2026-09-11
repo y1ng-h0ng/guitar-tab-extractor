@@ -14,6 +14,53 @@ from tabextract.geometry import staff_groups
 
 
 class DetailPreservationTests(unittest.TestCase):
+    def test_temporarily_occluded_fret_numbers_chords_and_dots_survive(self):
+        for polarity in ("bright", "dark"):
+            with self.subTest(polarity=polarity):
+                ink = np.zeros((180, 480), np.uint8)
+                for y in range(65, 116, 10):
+                    cv2.line(ink, (10, y), (470, y), 230, 1)
+                notes = np.zeros_like(ink)
+                for text, x, y in [("7", 110, 103), ("12", 180, 83), ("9", 180, 103)]:
+                    cv2.putText(notes, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.45, 230, 1, cv2.LINE_AA)
+                cv2.circle(notes, (220, 138), 1, 230, -1)
+                frames = []
+                for i in range(20):
+                    gray = np.maximum(np.maximum(ink, notes), 25)
+                    if i < 7:
+                        gray[55:150, 105:228] = 25
+                        gray[125:155, 300] = 230  # Transient cursor.
+                    else:
+                        # A weak piece of moving scenery is not a new note,
+                        # even when it appears in a majority of samples.
+                        gray[88:100, 330:333] = 65
+                    if polarity == "dark":
+                        gray = 255 - gray
+                    frames.append(cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
+                page = clean_frames(frames, polarity)
+                out = cv2.resize(page, (480, 180), interpolation=cv2.INTER_AREA)
+                # Check each note separately: total ink or measure counts can
+                # pass even when an entire individual note has disappeared.
+                for x0, y0, x1, y1 in [(110, 90, 124, 104), (180, 70, 201, 84),
+                                       (180, 90, 194, 104), (217, 135, 224, 142)]:
+                    target = notes[y0:y1, x0:x1] > 140
+                    kept = out[y0:y1, x0:x1] < 180
+                    self.assertGreater(float((target & kept).sum() / target.sum()), 0.95)
+                self.assertTrue((out[130:150, 299:302] > 245).all())
+                self.assertTrue((out[89:94, 330:333] > 245).all())
+
+    def test_sharpening_does_not_fade_a_low_contrast_symbol(self):
+        gray = np.full((160, 400), 75, np.uint8)
+        for y in range(70, 121, 10):
+            cv2.line(gray, (10, y), (390, y), 230, 1)
+        cv2.putText(gray, "9", (100, 52), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45, 102, 1, cv2.LINE_AA)
+        frames = [cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)] * 12
+        page = clean_frames(frames, "bright")
+        symbol = page[120:165, 297:345]
+        self.assertGreater(np.count_nonzero(symbol < 180), 70)
+
     def test_occluded_stem_recovers_without_inventing_a_source_gap_or_cursor(self):
         for polarity in ("bright", "dark"):
             with self.subTest(polarity=polarity):
