@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import cv2
 import numpy as np
-from .clean import infer_polarity, stroke_response
+from .clean import infer_polarity, observed_staff, stroke_response
 from .geometry import staff_groups
 from .support import check_cancel
 
@@ -76,29 +76,7 @@ def scan_segments(
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         step = max(1, round(fps / sample_fps))
         auto_mode = polarity == "auto"
-        ok, reference = cap.read()
-        if not ok:
-            raise OSError("无法读取视频首帧")
-        reference = crop_frame(reference, region)
-        if polarity == "auto":
-            polarity = infer_polarity(reference)
-        ref_response = stroke_response(reference, polarity, 5).astype(np.int16)
-        groups = staff_groups(
-            255 - np.clip(ref_response * 3, 0, 255).astype(np.uint8), coverage=0.18
-        )
-        if not groups and total > 0:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total // 3))
-            ok, reference = cap.read()
-            if ok:
-                reference = crop_frame(reference, region)
-                if auto_mode:
-                    polarity = infer_polarity(reference)
-                ref_response = stroke_response(reference, polarity, 5).astype(np.int16)
-                groups = staff_groups(
-                    255 - np.clip(ref_response * 3, 0, 255).astype(np.uint8),
-                    coverage=0.18,
-                )
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        groups = []
         times, differences = [], []
         previous = None
         idx = 0
@@ -109,8 +87,16 @@ def scan_segments(
                 if not ok:
                     raise OSError(f"读取第 {idx} 帧失败")
                 crop = crop_frame(frame, region)
-                if polarity == "auto":
-                    polarity = infer_polarity(crop)
+                if not groups:
+                    candidate_polarity = infer_polarity(crop) if auto_mode else polarity
+                    groups = observed_staff(crop, candidate_polarity)
+                    if not groups:
+                        # Intro footage and fade-in frames must not vote in
+                        # the first page's consensus or determine its polarity.
+                        idx += 1
+                        continue
+                    polarity = candidate_polarity
+                    log(f"首个可见六线谱: {idx / fps:.2f} 秒")
                 feature = signature(crop, polarity, groups)
                 norm = float(np.linalg.norm(feature))
                 if previous is not None:
@@ -129,6 +115,8 @@ def scan_segments(
                 if progress and len(times) % max(1, round(sample_fps)) == 0:
                     progress(min(idx / max(total, 1), 0.99))
             idx += 1
+        if not groups:
+            raise RuntimeError("视频中未检测到可见六线谱，请检查框选区域与颜色模式")
         if len(times) < 2:
             raise ValueError("视频太短，至少需要两帧可用采样")
     finally:
