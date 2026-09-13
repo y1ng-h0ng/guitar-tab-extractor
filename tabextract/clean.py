@@ -35,6 +35,14 @@ def infer_polarity(bgr):
     return "bright" if scores[0] >= scores[1] else "dark"
 
 
+def observed_staff(bgr, polarity):
+    """Locate staff lines in source evidence before consensus can reject them."""
+    response = stroke_response(bgr, polarity, kernel=5).astype(np.int16)
+    return staff_groups(
+        255 - np.clip(response * 3, 0, 255).astype(np.uint8), coverage=0.18
+    )
+
+
 def _restore_stem_evidence(page, low, median, high, groups, upscale):
     """Recover observed vertical strokes briefly hidden by footage/playheads.
 
@@ -109,13 +117,24 @@ def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None):
             infer_polarity(frames[i]) for i in (0, len(frames) // 2, len(frames) - 1)
         ]
         polarity = max(set(votes), key=votes.count)
+    references = [
+        observed_staff(frames[i], polarity)
+        for i in sorted(set((0, len(frames) // 2, len(frames) - 1)))
+    ]
+    references = [groups for groups in references if groups]
+    source_groups = max(references, key=len) if references else []
+    spacing = [float(np.median(np.diff(g))) for groups in references for g in groups]
+    # A fixed three-source-pixel opening removes wide eighth-note beams as
+    # background. Scale it with the observed staff, keeping small-score behavior.
+    native_kernel = max(3, round(float(np.median(spacing)) / 3) | 1) if spacing else 3
+    kernel = (native_kernel * upscale) | 1
     features = []
     for frame in frames:
         check_cancel(cancel_event)
         image = cv2.resize(
             frame, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC
         )
-        features.append(stroke_response(image, polarity, kernel=3 * upscale))
+        features.append(stroke_response(image, polarity, kernel=kernel))
     stack = np.stack(features)
     # Strong strokes need support in 60% of samples, not 75%: the old hard
     # veto could delete an ENTIRE fret number during a brief occlusion. Keep
@@ -135,6 +154,10 @@ def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None):
     page = 255 - alpha.astype(np.uint8)
     # Accept faint pixels only within evidenced horizontal line bands.
     groups = staff_groups(page)
+    if not groups and source_groups:
+        # Bootstrap from actually observed source lines, never draw missing
+        # lines: the restoration below still requires temporal pixel evidence.
+        groups = [(lines + 0.5) * upscale - 0.5 for lines in source_groups]
     for lines in groups:
         for line in lines:
             y = int(round(line))
