@@ -109,9 +109,30 @@ def _sharpen_annotations(page, low, high, groups, upscale):
     page[mask] = refined[mask]
 
 
-def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None):
+def _covered_percentiles(features, offsets, upscale, minimum=3):
+    """Ignore out-of-frame columns when combining registered scrolling frames."""
+    height, width = features[0].shape
+    bounds = [(max(0, int(np.ceil(dx * upscale))),
+               min(width, int(np.floor(width + dx * upscale)))) for dx in offsets]
+    cuts = sorted({0, width, *(max(0, min(width, v)) for pair in bounds for v in pair)})
+    result = np.zeros((4, height, width), np.float32)
+    for left, right in zip(cuts, cuts[1:]):
+        usable = [f[:, left:right] for f, (a, b) in zip(features, bounds)
+                  if a <= left and b >= right]
+        if len(usable) >= minimum:
+            result[:, :, left:right] = np.percentile(
+                np.stack(usable), [25, 40, 50, 75], axis=0
+            )
+    return result
+
+
+def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None,
+                 horizontal_offsets=None):
     if not frames:
         raise ValueError("没有用于清洗的帧")
+    if horizontal_offsets is not None:
+        if len(horizontal_offsets) != len(frames) or not np.isfinite(horizontal_offsets).all():
+            raise ValueError("滚动帧位移必须与采样帧一一对应且为有限数值")
     if polarity == "auto":
         votes = [
             infer_polarity(frames[i]) for i in (0, len(frames) // 2, len(frames) - 1)
@@ -129,19 +150,30 @@ def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None):
     native_kernel = max(3, round(float(np.median(spacing)) / 3) | 1) if spacing else 3
     kernel = (native_kernel * upscale) | 1
     features = []
-    for frame in frames:
+    for index, frame in enumerate(frames):
         check_cancel(cancel_event)
         image = cv2.resize(
             frame, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC
         )
-        features.append(stroke_response(image, polarity, kernel=kernel))
-    stack = np.stack(features)
+        feature = stroke_response(image, polarity, kernel=kernel)
+        if horizontal_offsets is not None:
+            matrix = np.float32([[1, 0, horizontal_offsets[index] * upscale], [0, 1, 0]])
+            feature = cv2.warpAffine(feature, matrix, feature.shape[::-1],
+                                     flags=cv2.INTER_LINEAR, borderValue=0)
+        features.append(feature)
     # Strong strokes need support in 60% of samples, not 75%: the old hard
     # veto could delete an ENTIRE fret number during a brief occlusion. Keep
     # the stricter consensus for faint texture so the relaxed rule does not
     # promote moving background details into apparent musical symbols.
-    low, supported, median, high = np.percentile(stack, [25, 40, 50, 75], axis=0)
-    del stack, features
+    if horizontal_offsets is None:
+        low, supported, median, high = np.percentile(
+            np.stack(features), [25, 40, 50, 75], axis=0
+        )
+    else:
+        low, supported, median, high = _covered_percentiles(
+            features, horizontal_offsets, upscale
+        )
+    del features
     alpha = np.clip((high - 8) * (255 / 35), 0, 255)
     strong = (low < 10) & (supported >= 10) & (high >= 60)
     nearby = cv2.dilate(

@@ -213,6 +213,8 @@ class App:
         r = self.summary; win = tk.Toplevel(self.root); win.title("提取检查结果"); win.geometry("740x420")
         box = tk.Text(win, wrap="word", padx=14, pady=14); box.pack(fill="both", expand=True)
         text = f"源页面：{r['video_pages']}\n谱表行数：{r['score_rows']}\nPDF 页数：{r['pdf_pages']}\n"
+        if r.get("scroll_joins"):
+            text += f"通过翻页补帧连接：{r['scroll_joins']} 处\n"
         text += f"图像边界推定的小节单元：{r['measures']}（完整边界：{r['complete_measure_units']}）\n\n"
         if r.get("rows"): text += "各行小节数：" + " / ".join(str(row["units"]) for row in r["rows"]) + "\n"
         if "crossing_marks" in r:

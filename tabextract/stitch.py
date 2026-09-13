@@ -113,7 +113,55 @@ def find_horizontal_shift(a, b, lines):
     return best
 
 
-def _horizontal_runs(pages, result, log, cancel_event):
+def _seam(previous, current, lines, shift):
+    space = float(np.median(np.diff(lines)))
+    aa, bb = bar_lines(previous, lines), bar_lines(current, lines)
+    pairs = [(x, y) for x in aa for y in bb
+             if abs(x - y - shift) <= max(3, space * 0.2)
+             and shift + space < x < previous.shape[1] - space]
+    if not pairs:
+        return None
+    center = (shift + previous.shape[1]) / 2
+    x, y = min(pairs, key=lambda pair: abs(pair[0] - center))
+    guard = max(2, round(space * 0.16))
+    return max(0, x - guard), max(0, y - guard)
+
+
+def _append_at_seam(canvas, offset, current, seam):
+    ca, cb = seam
+    end = offset + ca
+    return np.hstack([canvas[:, :end], current[:, cb:]]), end - cb
+
+
+def _tracked_match(previous, current, lines, expected_shift):
+    """Verify a measured video displacement instead of guessing from repeats.
+
+    Motion tracking supplies independent correspondence when partial/faint
+    labels in an animated frame cannot pass the ordinary label comparison.
+    Pixel similarity and an observed common barline are still required.
+    """
+    if previous.shape != current.shape or not np.isfinite(expected_shift):
+        return None
+    a, b = _feature(previous, lines), _feature(current, lines)
+    space = float(np.median(np.diff(lines)))
+    radius = max(3, round(space * 0.2))
+    best = None
+    for shift in range(max(1, round(expected_shift) - radius),
+                       min(previous.shape[1] - round(space * 3),
+                           round(expected_shift) + radius) + 1):
+        overlap = previous.shape[1] - shift
+        score = _cosine(a[:, shift:], b[:, :overlap])
+        if best is None or score > best["overlap_score"]:
+            best = {"shift": shift, "overlap_score": score}
+    if best is None or best["overlap_score"] < 0.78:
+        return None
+    seam = _seam(previous, current, lines, best["shift"])
+    if seam is None:
+        return None
+    return best, seam
+
+
+def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
     canvas = pages[0].copy()
     previous = pages[0]
     offset = 0
@@ -121,6 +169,26 @@ def _horizontal_runs(pages, result, log, cancel_event):
     for i, current in enumerate(pages[1:], 1):
         check_cancel(cancel_event)
         match = find_horizontal_shift(previous, current, lines)
+        seam = _seam(previous, current, lines, match["shift"]) if match and not match["duplicate"] else None
+        if bridge_provider and (match is None or (not match["duplicate"] and seam is None)):
+            bridge = bridge_provider(i, previous, current)
+            if bridge is not None:
+                middle = bridge["page"]
+                groups = staff_groups(middle)
+                left = _tracked_match(previous, middle, lines, bridge["first_shift"])
+                right = _tracked_match(middle, current, groups[0], bridge["second_shift"]) if len(groups) == 1 else None
+                if left is not None and right is not None:
+                    canvas, offset = _append_at_seam(canvas, offset, middle, left[1])
+                    canvas, offset = _append_at_seam(canvas, offset, current, right[1])
+                    result.joins.append({
+                        "from_page": i, "to_page": i + 1, "status": "joined_scroll",
+                        **{k: v for k, v in bridge.items() if k != "page"},
+                        "first_match": left[0], "second_match": right[0],
+                    })
+                    log(f"页面 {i} → {i + 1}：补采 {bridge['samples']} 帧，按滚动位移连接前后谱面")
+                    previous = current
+                    lines = staff_groups(previous)[0]
+                    continue
         if match is None:
             result.warnings.append(f"源页面 {i} → {i + 1} 的重叠未能可靠确认，已分别保留；请核对接缝。")
             result.joins.append({"from_page": i, "to_page": i + 1, "status": "unresolved"})
@@ -134,25 +202,15 @@ def _horizontal_runs(pages, result, log, cancel_event):
             continue
         else:
             dx = match["shift"]
-            space = float(np.median(np.diff(lines)))
-            aa = bar_lines(previous, lines)
-            bb = bar_lines(current, lines)
-            pairs = [(x, y) for x in aa for y in bb if abs(x - (y + dx)) <= max(3, space * 0.2) and dx + space < x < previous.shape[1] - space]
-            if not pairs:
+            if seam is None:
                 result.warnings.append(f"源页面 {i} → {i + 1} 虽有像素重叠，但未确认共同小节线，已分别保留。")
                 result.joins.append({"from_page": i, "to_page": i + 1, "status": "unresolved_bar", **match})
                 result.runs.append(canvas)
                 canvas = current.copy()
                 offset = 0
             else:
-                center = (dx + previous.shape[1]) / 2
-                x, y = min(pairs, key=lambda pair: abs(pair[0] - center))
-                guard = max(2, round(space * 0.16))
-                ca = max(0, x - guard)
-                cb = max(0, y - guard)
-                end = offset + ca
-                canvas = np.hstack([canvas[:, :end], current[:, cb:]])
-                offset = end - cb
+                ca, cb = seam
+                canvas, offset = _append_at_seam(canvas, offset, current, seam)
                 result.joins.append({"from_page": i, "to_page": i + 1, "status": "joined", "seam_previous": ca, "seam_current": cb, **match})
                 log(f"页面 {i} → {i + 1}：重叠 {previous.shape[1] - dx} 像素，整小节接缝，匹配 {match['overlap_score']:.3f}")
         previous = current
@@ -240,12 +298,13 @@ def _measure_units(image, result, run_index):
     return units
 
 
-def assemble_score(pages, bars_per_row=4, log=print, cancel_event=None):
+def assemble_score(pages, bars_per_row=4, log=print, cancel_event=None,
+                   bridge_provider=None):
     if not pages:
         raise ValueError("没有可拼接的谱面")
     result = Assembly()
     if all(len(staff_groups(p)) == 1 for p in pages):
-        _horizontal_runs(pages, result, log, cancel_event)
+        _horizontal_runs(pages, result, log, cancel_event, bridge_provider)
     else:
         _vertical_runs(pages, result, log)
     for run_index, run in enumerate(result.runs):

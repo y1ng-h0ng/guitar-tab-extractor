@@ -9,6 +9,7 @@ import numpy as np
 from .region import detect_tab_region
 from .pages import scan_segments, load_segment_frames
 from .clean import clean_frames
+from .scroll import make_scroll_bridge
 from .geometry import staff_groups
 from .stitch import assemble_score, stack_rows
 from .pdfout import export_rows
@@ -118,6 +119,7 @@ def run_pipeline(
         cancel_event=cancel_event,
     )
     pages = []
+    kept_segments = []
     view_info = []
     skipped = []
     progress(36, "[3/5] 每页多帧合成，去除背景和播放指示线 ...")
@@ -132,6 +134,7 @@ def run_pipeline(
             log(f"跳过 {segment.start:.2f}–{segment.end:.2f} 秒：未见有效六线谱")
             continue
         pages.append(page)
+        kept_segments.append(segment)
         info = {
             "page": len(pages),
             "start_seconds": segment.start,
@@ -151,7 +154,19 @@ def run_pipeline(
     if not pages:
         raise RuntimeError("没有提取到有效谱面，请检查框选区域与颜色模式")
     progress(77, "[4/5] 相邻页去重，保护连音换行并对齐行宽 ...")
-    result = assemble_score(pages, bars_per_row, log, cancel_event)
+
+    def bridge_provider(index, previous, current):
+        progress(77 + 11 * index / max(1, len(pages) - 1),
+                 f"补采页面 {index} → {index + 1} 的翻页过程 ...")
+        bridge = make_scroll_bridge(
+            source, region, kept_segments[index - 1], kept_segments[index],
+            actual_polarity, sample_fps, cancel_event,
+        )
+        if debug and bridge is not None:
+            write_image(debug / f"scroll_{index:02}_clean.png", bridge["page"])
+        return bridge
+
+    result = assemble_score(pages, bars_per_row, log, cancel_event, bridge_provider)
     for item in result.joins:
         if "to_page" in item:
             item["time_seconds"] = view_info[item["to_page"] - 1]["start_seconds"]
@@ -203,6 +218,7 @@ def run_pipeline(
         "source_views": view_info,
         "skipped_segments": skipped,
         "joins": result.joins,
+        "scroll_joins": sum(j["status"] == "joined_scroll" for j in result.joins),
         "rows": result.row_info,
         "crossing_marks": result.crossing_marks,
         "layout_policy": "以目标小节数为主，跨小节连线处允许局部调整；在安全空白处扩展行宽，不拉伸音符。",
