@@ -14,6 +14,64 @@ from tabextract.geometry import staff_groups
 
 
 class DetailPreservationTests(unittest.TestCase):
+    def test_majority_visible_note_and_upper_stem_survive(self):
+        for polarity in ("bright", "dark"):
+            with self.subTest(polarity=polarity):
+                base = np.full((180, 480), 25, np.uint8)
+                for y in range(70, 121, 10):
+                    cv2.line(base, (10, y), (470, y), 230, 1)
+                base[83:103, 104:126] = 25
+                base[83:103, 377:395] = 25
+                note = np.zeros_like(base)
+                cv2.putText(note, "8", (108, 98), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.4, 230, 1, cv2.LINE_AA)
+                # Upward stems and a source gap above the strings.
+                cv2.line(note, (200, 28), (200, 92), 230, 1)
+                cv2.line(note, (245, 28), (245, 92), 230, 1)
+                note[43:55, 243:248] = 0
+                frames = []
+                for i in range(20):
+                    frame = base.copy()
+                    if i >= 9:  # Visible in 55%, hidden in 45%.
+                        frame = np.maximum(frame, note)
+                    if i < 10:  # Exactly half: must not become a note/stem.
+                        cv2.line(frame, (330, 28), (330, 62), 230, 1)
+                        cv2.putText(frame, "9", (380, 98), cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.4, 230, 1, cv2.LINE_AA)
+                    if polarity == "dark":
+                        frame = 255 - frame
+                    frames.append(cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR))
+                page = clean_frames(frames, polarity)
+                out = cv2.resize(page, (480, 180), interpolation=cv2.INTER_AREA)
+                roi = np.s_[86:100, 105:125]
+                target = note[roi] > 140
+                self.assertGreater(float((out[roi][target] < 180).mean()), 0.95)
+                self.assertTrue((out[29:68, 200] < 100).all())
+                self.assertTrue((out[46:52, 244:247] > 245).all())
+                self.assertTrue((out[28:62, 329:332] > 245).all())
+                self.assertTrue((out[86:100, 378:393] > 245).all())
+
+    def test_fret_number_counters_remain_open_between_strings(self):
+        for polarity in ("bright", "dark"):
+            with self.subTest(polarity=polarity):
+                ink = np.zeros((170, 400), np.uint8)
+                for y in range(65, 116, 10):
+                    cv2.line(ink, (10, y), (390, y), 230, 1)
+                # Model a tiny blurred 8 with two known counters, in a gap
+                # left in the strings by the original score renderer.
+                ink[72:99, 98:115] = 0
+                cv2.rectangle(ink, (102, 76), (106, 88), 230, 1)
+                cv2.line(ink, (102, 82), (106, 82), 230, 1)
+                gray = np.maximum(cv2.GaussianBlur(ink, (0, 0), 0.7), 25)
+                if polarity == "dark":
+                    gray = 255 - gray
+                page = clean_frames([cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)] * 12,
+                                    polarity)
+                for y in (79, 85):
+                    self.assertGreater(float(page[y*3:y*3+3, 312:315].mean()), 200)
+                self.assertGreater(np.count_nonzero(page[232:245, 308:318] > 200), 80)
+                self.assertLess(float(page[230:263, 305:309].mean()), 110)
+
     def test_large_score_keeps_thick_beams_and_single_note_flags(self):
         for polarity in ("bright", "dark"):
             with self.subTest(polarity=polarity):
