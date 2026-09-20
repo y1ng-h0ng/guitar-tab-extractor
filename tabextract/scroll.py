@@ -87,8 +87,12 @@ def _register_step(previous, current, old_labels, new_labels):
     return index + subpixel, score, margin
 
 
-def track_scroll(frames, polarity):
-    """Measure every consecutive leftward move; reject ambiguous registrations."""
+def _track_direction(frames, polarity):
+    """Track leftward motion, omitting isolated unregistrable video frames.
+
+    A skipped frame contributes neither a guessed position nor cleanup pixels:
+    the next retained frame must independently match the last reliable frame.
+    """
     if len(frames) < 3:
         return None
     groups = observed_staff(frames[0], polarity)
@@ -98,26 +102,84 @@ def track_scroll(frames, polarity):
     width = features[0].shape[1]
     scale = frames[0].shape[1] / width
     labels = [_number_strip(f, polarity, groups, width) for f in frames]
-    positions, scores, margins = [0.0], [], []
-    for index in range(1, len(frames)):
-        registration = _register_step(features[index - 1], features[index],
-                                      labels[index - 1], labels[index])
-        if registration is None:
+    positions, indices, scores, margins = [0.0], [0], [], []
+    previous = 0
+    while previous < len(frames) - 1:
+        for index in range(previous + 1, min(len(frames), previous + 4)):
+            registration = _register_step(features[previous], features[index],
+                                          labels[previous], labels[index])
+            if registration is not None:
+                break
+        else:
+            return None
+        # Never bridge a long unreliable passage with sparse coincidences.
+        if index - len(indices) > max(1, len(frames) // 5):
             return None
         shift, score, margin = registration
         step = max(0.0, shift * scale)
         if step < 1:
             step = 0.0
         positions.append(positions[-1] + step)
+        indices.append(index)
         scores.append(score)
         margins.append(margin)
+        previous = index
     # Both ends must include stationary evidence from their stable pages.
     if positions[1] > 1 or positions[-1] - positions[-2] > 1:
         return None
     if np.count_nonzero(np.diff(positions) > 1) < 3:
         return None  # An instantaneous cut supplies no evidence for a gap.
-    return {"positions": positions, "minimum_match": min(scores),
+    return {"positions": positions, "frame_indices": indices,
+            "minimum_match": min(scores),
             "minimum_margin": min(margins)}
+
+
+def _path_score(features, tracking, scale):
+    """Check non-adjacent frames, so one repeated motif cannot set the path."""
+    indices, positions = tracking["frame_indices"], tracking["positions"]
+    width = features[0].shape[1]
+    scores = []
+    for a in range(len(indices)):
+        for b in range(a + 2, len(indices)):
+            shift = round((positions[b] - positions[a]) / scale)
+            if 5 < shift < width * 0.75:
+                scores.append(_similarity(features[indices[a]][:, shift:],
+                                          features[indices[b]][:, :width - shift]))
+    return float(np.percentile(scores, 25)) if len(scores) >= 3 else 0.0
+
+
+def track_scroll(frames, polarity):
+    """Cross-check forward/backward tracks through repeated musical phrases."""
+    forward = _track_direction(frames, polarity)
+    # Reverse time and the horizontal axis: the same leftward matcher now
+    # uses the other end of the overlap, independently of a misleading prefix.
+    reverse = _track_direction([np.ascontiguousarray(f[:, ::-1])
+                                for f in frames[::-1]], polarity)
+    if reverse is not None:
+        positions = np.array(reverse["positions"])
+        reverse["positions"] = (positions[-1] - positions[::-1]).tolist()
+        reverse["frame_indices"] = [len(frames) - 1 - i
+                                    for i in reverse["frame_indices"][::-1]]
+    candidates = [("forward", forward), ("reverse", reverse)]
+    candidates = [(name, path) for name, path in candidates if path is not None]
+    if not candidates:
+        return None
+    if forward is not None and reverse is not None:
+        f = dict(zip(forward["frame_indices"], forward["positions"]))
+        r = dict(zip(reverse["frame_indices"], reverse["positions"]))
+        if max(abs(f[i] - r[i]) for i in f.keys() & r.keys()) <= 3:
+            return {**forward, "tracking_direction": "forward"}
+    groups = observed_staff(frames[0], polarity)
+    features = [signature(f, polarity, groups) for f in frames]
+    scale = frames[0].shape[1] / features[0].shape[1]
+    ranked = sorted([(_path_score(features, path, scale), name, path)
+                     for name, path in candidates], key=lambda item: item[0], reverse=True)
+    score, name, path = ranked[0]
+    # Disagreement needs strong whole-path evidence, not a preference for the
+    # larger displacement. If both explanations fit, preserve separate views.
+    if score < 0.78 or (len(ranked) > 1 and score - ranked[1][0] < 0.06):
+        return None
+    return {**path, "tracking_direction": name, "path_match": score}
 
 
 def load_scroll_frames(video_path, region, previous_segment, next_segment,
@@ -156,6 +218,9 @@ def make_scroll_bridge(video_path, region, previous_segment, next_segment,
     if tracking is None:
         return None
     positions = np.array(tracking.pop("positions"))
+    indices = tracking.pop("frame_indices")
+    skipped = len(frames) - len(indices)
+    frames = [frames[i] for i in indices]
     distance = float(positions[-1])
     if not frames[0].shape[1] * 0.05 < distance < frames[0].shape[1] * 1.45:
         return None
@@ -172,4 +237,5 @@ def make_scroll_bridge(video_path, region, previous_segment, next_segment,
             "second_shift": (distance - anchor) * upscale,
             "start_seconds": start / previous_segment.fps,
             "end_seconds": end / previous_segment.fps,
-            "samples": len(frames), "scroll_pixels": distance, **tracking}
+            "samples": len(frames), "skipped_frames": skipped,
+            "scroll_pixels": distance, **tracking}

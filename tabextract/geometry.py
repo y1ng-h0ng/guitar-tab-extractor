@@ -67,6 +67,11 @@ def bar_lines(page, lines):
         if b - a > space * 0.9:
             continue
         x = a + int(np.argmax(ink[top : bottom + 1, a : b + 1].sum(axis=0)))
+        # Horizontal dilation can turn the bowed side of a circled chord into
+        # an apparent barline. A real bar also has a straight observed core;
+        # cutting at an oval edge splits a single measure (and the chord).
+        if float(ink[top : bottom + 1, x].mean()) < 0.90:
+            continue
         below_a = min(page.shape[0], bottom + max(3, round(space * 0.25)))
         below_b = min(page.shape[0], bottom + round(space * 2))
         side = max(2, round(space * 0.4))

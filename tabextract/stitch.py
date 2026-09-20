@@ -170,7 +170,10 @@ def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
         check_cancel(cancel_event)
         match = find_horizontal_shift(previous, current, lines)
         seam = _seam(previous, current, lines, match["shift"]) if match and not match["duplicate"] else None
-        if bridge_provider and (match is None or (not match["duplicate"] and seam is None)):
+        # A repeated phrase can look like a perfect overlap while the video
+        # actually scrolls past it. Prefer independently observed motion even
+        # when the two resting images appear to match.
+        if bridge_provider:
             bridge = bridge_provider(i, previous, current)
             if bridge is not None:
                 middle = bridge["page"]
@@ -189,6 +192,12 @@ def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
                     previous = current
                     lines = staff_groups(previous)[0]
                     continue
+                expected = bridge["first_shift"] + bridge["second_shift"]
+                tolerance = max(6, float(np.median(np.diff(lines))) * 0.6)
+                if match is not None and abs(match["shift"] - expected) > tolerance:
+                    # Failed seam verification cannot turn conflicting motion
+                    # evidence into permission to delete a repeated measure.
+                    match, seam = None, None
         if match is None:
             result.warnings.append(f"源页面 {i} → {i + 1} 的重叠未能可靠确认，已分别保留；请核对接缝。")
             result.joins.append({"from_page": i, "to_page": i + 1, "status": "unresolved"})
@@ -324,7 +333,9 @@ def assemble_score(pages, bars_per_row=4, log=print, cancel_event=None,
         for start, end in breaks:
             group = units[start:end]
             left, right = group[0][2], group[-1][3]
-            side = round(result.staff_spacing * 1.2)
+            # Three-digit measure labels often start well left of their bar.
+            # Leave room to carry the complete label to the following row.
+            side = round(result.staff_spacing * 2)
             row = np.pad(run[:, left:right], ((0, 0), (side, side)), constant_values=255)
             if lines:
                 top = lines[0][0]
@@ -343,7 +354,7 @@ def assemble_score(pages, bars_per_row=4, log=print, cancel_event=None,
                         if w > space * 2 or h > space * 2:
                             continue
                         center = a + x + w / 2
-                        is_number = y >= label_top - space * 0.15 and h >= space * 0.2 and boundary - space * 0.45 <= center <= boundary + space * 1.4
+                        is_number = y >= label_top - space * 0.15 and h >= space * 0.2 and boundary - space * 1.8 <= center <= boundary + space * 1.4
                         belongs_right = is_number or center >= boundary
                         keep = belongs_right if is_left else not belongs_right
                         yy, xx = np.where(labels == k)

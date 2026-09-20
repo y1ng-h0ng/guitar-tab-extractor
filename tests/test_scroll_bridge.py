@@ -33,6 +33,47 @@ def scrolling_score(polarity):
 
 
 class ScrollBridgeTests(unittest.TestCase):
+    def test_one_bad_transition_frame_is_excluded_not_interpolated(self):
+        _, frames, positions = scrolling_score("bright")
+        frames[6] = np.full_like(frames[6], 25)
+        tracking = track_scroll(frames, "bright")
+        self.assertIsNotNone(tracking)
+        self.assertNotIn(6, tracking["frame_indices"])
+        expected = np.array(positions)[tracking["frame_indices"]]
+        np.testing.assert_allclose(tracking["positions"], expected, atol=2)
+
+    def test_whole_path_evidence_resolves_conflicting_repeated_motif_tracks(self):
+        _, frames, positions = scrolling_score("bright")
+        common = {"frame_indices": list(range(len(frames))),
+                  "minimum_match": 0.9, "minimum_margin": 0.1}
+        wrong = {**common, "positions": (np.array(positions) * 0.5).tolist()}
+        backward = {**common, "positions": (680 - np.array(positions)[::-1]).tolist()}
+        with patch("tabextract.scroll._track_direction", side_effect=[wrong, backward]):
+            tracking = track_scroll(frames, "bright")
+        self.assertIsNotNone(tracking)
+        self.assertEqual(tracking["tracking_direction"], "reverse")
+        np.testing.assert_allclose(tracking["positions"], positions)
+
+    def test_repeated_resting_views_do_not_delete_music_seen_during_scroll(self):
+        gray, _, _ = scrolling_score("bright")
+        score = np.where(gray > 140, 0, 255).astype(np.uint8)
+        score[:, 680:] = score[:, :640]
+        first, middle, last = score[:, :640], score[:, 340:980], score[:, 680:]
+        bridge = {"page": middle, "first_shift": 340,
+                  "second_shift": 340, "samples": 14}
+        result = assemble_score([first, last], log=lambda _: None,
+                                bridge_provider=lambda *_: bridge)
+        self.assertEqual(result.joins[0]["status"], "joined_scroll")
+        np.testing.assert_array_equal(result.runs[0], score)
+        # If the second seam is unverified, the conflicting measured motion
+        # still forbids discarding the repeated page as a duplicate.
+        bridge["second_shift"] = 280
+        uncertain = assemble_score([first, last], log=lambda _: None,
+                                   bridge_provider=lambda *_: bridge)
+        self.assertEqual(len(uncertain.runs), 2)
+        np.testing.assert_array_equal(uncertain.runs[0], first)
+        np.testing.assert_array_equal(uncertain.runs[1], last)
+
     def test_motion_bridge_preserves_a_note_missing_from_both_resting_views(self):
         for polarity in ("bright", "dark"):
             with self.subTest(polarity=polarity):
