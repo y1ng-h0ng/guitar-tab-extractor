@@ -393,16 +393,23 @@ def assemble_score(pages, bars_per_row=4, log=print, cancel_event=None,
     for index, (row, info) in enumerate(zip(result.rows, result.row_info)):
         info["natural_width"] = row.shape[1]
         info["space_insertions"] = []
-        if info["end_of_run"] and info["units"] < bars_per_row:
-            continue
+        info["target_width"] = target_width
+        info["horizontal_scale"] = 1.0
         groups = staff_groups(row)
         if groups:
             expanded, inserts = justify_row(row, groups[0], target_width)
             result.rows[index] = expanded
             info["width"] = expanded.shape[1]
             info["space_insertions"] = inserts
-            if expanded.shape[1] < target_width * 0.95:
-                result.warnings.append(f"第 {index + 1} 行没有足够的安全空隙用于行宽对齐，保留原始符号间距。")
+        if result.rows[index].shape[1] < target_width:
+            # A fully connected marking may leave no safe insertion column.
+            # Resize the complete row as a last resort, never split its ink
+            # or merely pad the canvas while leaving the score itself short.
+            source = result.rows[index]
+            result.rows[index] = cv2.resize(source, (target_width, source.shape[0]),
+                                             interpolation=cv2.INTER_LANCZOS4)
+            info["horizontal_scale"] = target_width / source.shape[1]
+            info["width"] = target_width
     return result
 
 

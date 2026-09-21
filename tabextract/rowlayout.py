@@ -81,28 +81,48 @@ def justify_row(row, lines, target_width):
     space = float(np.median(np.diff(lines)))
     band = max(1, round(space * 0.25))
     nonstaff = row < 245
+    horizontal = cv2.morphologyEx(
+        nonstaff.astype(np.uint8), cv2.MORPH_OPEN,
+        np.ones((1, max(3, round(space * .3))), np.uint8)
+    ) > 0
+    forbidden = np.zeros(row.shape[1], bool)
     for y in lines:
         yy = round(y)
-        nonstaff[max(0, yy - band) : yy + band + 1] = False
-    occupied = nonstaff.any(axis=0).astype(np.uint8)[None, :]
-    guard = max(1, round(space * 0.6))
-    occupied = cv2.dilate(occupied, np.ones((1, 2 * guard + 1), np.uint8))[0]
+        region = np.s_[max(0, yy - band):yy + band + 1]
+        # Ignore only evidenced long strings, not an entire horizontal band:
+        # a tiny dot centered on a string must not become an expansion column.
+        forbidden |= (nonstaff[region] & ~horizontal[region]).any(axis=0)
+        nonstaff[region] = False
     content = np.where(nonstaff.any(axis=0))[0]
     if not content.size:
         return row, []
-    occupied[: content[0] + guard] = 1
-    occupied[max(0, content[-1] - guard) :] = 1
-    gaps = [(a, b) for a, b in spans(np.where(occupied == 0)[0]) if b - a >= space * 0.35]
+    # Dense rhythms and dashed technique lines can leave only narrow safe
+    # channels. Reduce the comfort margin before giving up; every insertion
+    # still passes through a column with no non-staff ink.
+    gaps = []
+    for fraction in (.6, .3, .1, 0):
+        guard = round(space * fraction)
+        occupied = cv2.dilate(nonstaff.any(axis=0).astype(np.uint8)[None, :],
+                              np.ones((1, 2 * guard + 1), np.uint8))[0]
+        occupied[:content[0] + guard + 1] = 1
+        occupied[max(0, content[-1] - guard):] = 1
+        gaps = []
+        for a, b in spans(np.where(occupied == 0)[0]):
+            candidates = np.where(~forbidden[a:b + 1])[0] + a
+            if candidates.size:
+                x = int(candidates[np.argmin(abs(candidates - (a + b) / 2))])
+                gaps.append((a, b, x))
+        if gaps:
+            break
     if not gaps:
         return row, []
-    weights = np.sqrt([b - a + 1 for a, b in gaps])
+    weights = np.sqrt([b - a + 1 for a, b, _ in gaps])
     cumulative = np.rint(np.cumsum(weights / weights.sum()) * extra).astype(int)
     additions = np.diff(np.r_[0, cumulative])
     pieces, inserts, last = [], [], 0
-    for (a, b), count in zip(gaps, additions):
+    for (a, b, x), count in zip(gaps, additions):
         if count <= 0:
             continue
-        x = (a + b) // 2
         pieces.append(row[:, last:x])
         column = np.full((row.shape[0], 1), 255, np.uint8)
         for y in lines:

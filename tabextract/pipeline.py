@@ -221,7 +221,7 @@ def run_pipeline(
         "scroll_joins": sum(j["status"] == "joined_scroll" for j in result.joins),
         "rows": result.row_info,
         "crossing_marks": result.crossing_marks,
-        "layout_policy": "以目标小节数为主，跨小节连线处允许局部调整；在安全空白处扩展行宽，不拉伸音符。",
+        "layout_policy": "以目标小节数为主，跨小节连线处允许局部调整；各行含末行均按最长行统一总宽，优先扩展安全空白，无安全空隙时整行横向缩放。",
         "pdf_layout": layouts,
         "note": "小节数由图像边界推定，未进行音高或节奏的语义识别；源视频未显示的内容不会补写。",
     }
