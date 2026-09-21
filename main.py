@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from tabextract import run_pipeline
+from tabextract.support import parse_bars_per_row
 
 
 def main(argv=None):
@@ -13,7 +14,8 @@ def main(argv=None):
     parser.add_argument("-o", "--output", help="输出 PDF；默认与视频同名加 _吉他谱.pdf")
     parser.add_argument("--sample-fps", type=float, default=6.0, help="采样频率，0.5–30，默认 6")
     parser.add_argument("--dpi", type=int, default=300, help="PDF 内嵌图像最低 DPI，72–600，默认 300；不降低提取图分辨率")
-    parser.add_argument("--bars-per-row", type=int, default=4, help="每行目标小节数，1–8，默认 4；连音处允许局部调整")
+    parser.add_argument("--bars-per-row", type=parse_bars_per_row, default=None, metavar="auto|1-8",
+                        help="默认 auto 自动分行；填写 1–8 自定义每行目标小节数；所有行统一长度")
     parser.add_argument("--region", type=int, nargs=4, metavar=("X", "Y", "W", "H"), help="手动指定谱面矩形；默认自动定位")
     parser.add_argument("--polarity", choices=["auto", "bright", "dark"], default="auto", help="白字暗底用 bright，黑字白底用 dark")
     parser.add_argument("--debug-dir", help="保存谱面框、清洗前后截图、各行和拼接长图；默认不保存")

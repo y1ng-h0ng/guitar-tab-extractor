@@ -36,6 +36,38 @@ def crossing_marks(image, lines, boundaries):
     return found
 
 
+def choose_auto_breaks(units, crossings, staff_spacing):
+    """Balance source widths at a readable A4 scale, keeping whole measures.
+
+    About 78 staff spaces fit the PDF content width at a 6.5pt string gap;
+    reserve four spaces for row margins. Dense measures get fewer neighbors,
+    sparse measures more. Source resolution cannot change this decision.
+    """
+    total = len(units)
+    if not total:
+        return []
+    desired = max(1.0, staff_spacing * 74)
+    costs, previous = [float("inf")] * (total + 1), [None] * (total + 1)
+    costs[0] = 0.0
+    for end in range(1, total + 1):
+        for count in range(1, min(8, end) + 1):
+            start = end - count
+            width = units[end - 1][3] - units[start][2]
+            ratio = width / desired
+            penalty = 1 + 3 * (1 - ratio) ** 2 + 12 * max(0, ratio - 1) ** 2
+            if end < total and crossings[end - 1]:
+                penalty += 100
+            cost = costs[start] + penalty
+            if cost < costs[end] - 1e-9:
+                costs[end], previous[end] = cost, start
+    groups, end = [], total
+    while end:
+        start = previous[end]
+        groups.append((start, end))
+        end = start
+    return groups[::-1]
+
+
 def choose_breaks(units, crossings, target):
     total = len(units)
     if not total:

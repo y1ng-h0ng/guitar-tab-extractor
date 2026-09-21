@@ -15,7 +15,12 @@ except ImportError as error:
     raise SystemExit("缺少图形界面依赖，请安装官方 Python（包含 Tcl/Tk）和 requirements.txt。") from error
 from tabextract import run_pipeline
 from tabextract.pipeline import inspect_video
-from tabextract.support import CancelledError, open_file, validate_options
+from tabextract.support import CancelledError, open_file, parse_bars_per_row, validate_options
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except ImportError:
+    TkinterDnD = None
 
 VIDEO_EXTS = "*.mp4 *.mov *.avi *.mkv *.flv *.wmv *.m4v"
 COLORS = {"自动识别": "auto", "白字 / 暗底": "bright", "黑字 / 白底": "dark"}
@@ -80,25 +85,30 @@ class App:
         self.root = root; root.title("吉他谱视频提取工具"); root.geometry("860x660"); root.minsize(740, 580)
         self.events = queue.Queue(); self.worker = None; self.cancel_event = threading.Event(); self.closing = False
         self.region = None; self.region_source = None; self.summary = None; self.preview_path = None
-        self.video = tk.StringVar(); self.output = tk.StringVar(); self.fps = tk.StringVar(value="6"); self.dpi = tk.StringVar(value="300"); self.bars = tk.StringVar(value="4")
+        self.video = tk.StringVar(); self.output = tk.StringVar(); self.fps = tk.StringVar(value="6"); self.dpi = tk.StringVar(value="300"); self.bars = tk.StringVar(value="自动")
         self.color = tk.StringVar(value="自动识别"); self.debug = tk.BooleanVar(value=False); self.report = tk.BooleanVar(value=False)
-        self.status = tk.StringVar(value="选择视频即可开始；也可以先预览谱面范围。"); self.region_text = tk.StringVar(value="自动定位谱面")
+        self.status = tk.StringVar(value="拖入视频，点击“一键生成”；每行小节默认自动安排。"); self.region_text = tk.StringVar(value="自动定位谱面")
         frame = ttk.Frame(root, padding=18); frame.pack(fill="both", expand=True); frame.columnconfigure(1, weight=1); frame.rowconfigure(8, weight=1)
         ttk.Label(frame, text="从演示视频整理吉他谱", font=("Microsoft YaHei UI", 17, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 16))
-        ttk.Label(frame, text="视频文件").grid(row=1, column=0, sticky="w", padx=(0, 10)); ttk.Entry(frame, textvariable=self.video).grid(row=1, column=1, sticky="ew", pady=5); ttk.Button(frame, text="选择视频", command=self.pick_video).grid(row=1, column=2, padx=(10, 0))
+        ttk.Label(frame, text="视频（可拖入）").grid(row=1, column=0, sticky="w", padx=(0, 10))
+        self.video_entry = ttk.Entry(frame, textvariable=self.video); self.video_entry.grid(row=1, column=1, sticky="ew", pady=5)
+        self.pick_btn = ttk.Button(frame, text="选择视频", command=self.pick_video); self.pick_btn.grid(row=1, column=2, padx=(10, 0))
         ttk.Label(frame, text="输出 PDF").grid(row=2, column=0, sticky="w"); ttk.Entry(frame, textvariable=self.output).grid(row=2, column=1, sticky="ew", pady=5); ttk.Button(frame, text="保存位置", command=self.pick_output).grid(row=2, column=2, padx=(10, 0))
         roi = ttk.Frame(frame); roi.grid(row=3, column=0, columnspan=3, sticky="ew", pady=10)
         self.preview_btn = ttk.Button(roi, text="预览 / 框选谱面", command=self.preview); self.preview_btn.pack(side="left")
         self.auto_btn = ttk.Button(roi, text="恢复自动定位", command=self.reset_region); self.auto_btn.pack(side="left", padx=8); ttk.Label(roi, textvariable=self.region_text).pack(side="left", padx=8)
         opts = ttk.Frame(frame); opts.grid(row=4, column=0, columnspan=3, sticky="ew", pady=6)
-        for label, var, width in [("每行目标小节", self.bars, 3), ("采样 fps", self.fps, 4), ("DPI", self.dpi, 5)]:
+        ttk.Label(opts, text="每行小节").pack(side="left", padx=(0, 5))
+        self.bars_box = ttk.Combobox(opts, textvariable=self.bars, values=["自动", *range(1, 9)], width=6)
+        self.bars_box.pack(side="left", padx=(0, 14))
+        for label, var, width in [("采样 fps", self.fps, 4), ("DPI", self.dpi, 5)]:
             ttk.Label(opts, text=label).pack(side="left", padx=(0, 5)); ttk.Entry(opts, textvariable=var, width=width).pack(side="left", padx=(0, 14))
         ttk.Combobox(opts, textvariable=self.color, values=list(COLORS), state="readonly", width=14).pack(side="left")
         extras = ttk.Frame(frame); extras.grid(row=5, column=0, columnspan=3, sticky="w", pady=7)
         ttk.Checkbutton(extras, text="保存过程截图", variable=self.debug).pack(side="left")
         ttk.Checkbutton(extras, text="生成报告文件 (.report.json)", variable=self.report).pack(side="left", padx=(18, 0))
         actions = ttk.Frame(frame); actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=10)
-        self.run_btn = ttk.Button(actions, text="开始提取", command=self.start); self.run_btn.pack(side="left")
+        self.run_btn = ttk.Button(actions, text="一键生成", command=self.start); self.run_btn.pack(side="left")
         self.cancel_btn = ttk.Button(actions, text="取消", command=self.cancel, state="disabled"); self.cancel_btn.pack(side="left", padx=8)
         self.open_btn = ttk.Button(actions, text="打开 PDF", command=self.open_pdf, state="disabled"); self.open_btn.pack(side="left")
         self.report_btn = ttk.Button(actions, text="查看检查结果", command=self.show_report, state="disabled"); self.report_btn.pack(side="left", padx=8)
@@ -107,13 +117,52 @@ class App:
         self.log_text = tk.Text(logs, state="disabled", height=13, wrap="word", font=("Consolas", 10)); self.log_text.pack(side="left", fill="both", expand=True)
         scroll = ttk.Scrollbar(logs, command=self.log_text.yview); scroll.pack(side="right", fill="y"); self.log_text.config(yscrollcommand=scroll.set)
         ttk.Label(frame, textvariable=self.status, wraplength=780).grid(row=9, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.drop_enabled = False
+        try:
+            if TkinterDnD is not None:
+                TkinterDnD.require(root)
+                for target in (frame, self.video_entry):
+                    target.drop_target_register(DND_FILES)
+                    target.dnd_bind("<<Drop>>", self.drop_video)
+                self.drop_enabled = True
+        except (RuntimeError, tk.TclError):
+            pass
+        if not self.drop_enabled:
+            self.status.set("点击“选择视频”后即可一键生成；重新运行安装脚本可启用视频拖放。")
         root.protocol("WM_DELETE_WINDOW", self.close); root.after(80, self.poll)
+
+    def select_video(self, path):
+        if self.worker and self.worker.is_alive():
+            return False
+        old = self.video.get(); self.video.set(path); self.reset_region()
+        if not self.output.get() or self.output.get() == os.path.splitext(old)[0] + "_吉他谱.pdf":
+            self.output.set(os.path.splitext(path)[0] + "_吉他谱.pdf")
+        self.summary = None
+        self.open_btn.config(state="disabled"); self.report_btn.config(state="disabled")
+        self.status.set("视频已就绪，点击“一键生成”即可；也可在“每行小节”中自定义。")
+        return True
+
+    def drop_video(self, event):
+        if self.worker and self.worker.is_alive():
+            self.status.set("正在处理视频，请完成或取消后再拖入新视频。")
+            return "refuse_drop"
+        try:
+            paths = self.root.tk.splitlist(event.data)
+            if len(paths) != 1:
+                raise ValueError("请一次拖入一个视频文件。")
+            path = Path(paths[0])
+            if not path.is_file() or path.suffix.lower() not in {ext[1:] for ext in VIDEO_EXTS.split()}:
+                raise ValueError("请拖入 MP4、MOV、AVI、MKV 等视频文件。")
+        except (ValueError, tk.TclError) as error:
+            self.status.set(str(error))
+            return "refuse_drop"
+        self.select_video(str(path))
+        return "copy"
 
     def pick_video(self):
         path = filedialog.askopenfilename(title="选择演示视频", filetypes=[("视频", VIDEO_EXTS), ("所有文件", "*.*")])
         if path:
-            old = self.video.get(); self.video.set(path); self.reset_region()
-            if not self.output.get() or self.output.get() == os.path.splitext(old)[0] + "_吉他谱.pdf": self.output.set(os.path.splitext(path)[0] + "_吉他谱.pdf")
+            self.select_video(path)
 
     def pick_output(self):
         path = filedialog.asksaveasfilename(title="保存 PDF", defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
@@ -127,7 +176,7 @@ class App:
         return path
 
     def busy(self, value):
-        for b in (self.run_btn, self.preview_btn, self.auto_btn): b.config(state="disabled" if value else "normal")
+        for b in (self.run_btn, self.preview_btn, self.auto_btn, self.pick_btn, self.video_entry): b.config(state="disabled" if value else "normal")
         self.cancel_btn.config(state="normal" if value else "disabled")
 
     def launch(self, fn):
@@ -157,11 +206,12 @@ class App:
         self.launch(task)
 
     def apply_region(self, region, path):
-        self.region = region; self.region_source = path; self.region_text.set("已框选：" + str(region)); self.status.set("谱面范围已设置，开始提取即可。")
+        self.region = region; self.region_source = path; self.region_text.set("已框选：" + str(region)); self.status.set("谱面范围已设置，点击“一键生成”即可。")
 
     def start(self):
+        if self.worker and self.worker.is_alive(): return
         try:
-            video = self.valid_video(); fps = float(self.fps.get()); dpi = int(self.dpi.get()); bars = int(self.bars.get()); validate_options(fps, dpi, bars)
+            video = self.valid_video(); fps = float(self.fps.get()); dpi = int(self.dpi.get()); bars = parse_bars_per_row(self.bars.get()); validate_options(fps, dpi, bars)
             out = self.output.get().strip() or os.path.splitext(video)[0] + "_吉他谱.pdf"; self.output.set(out)
             region = self.region if self.region_source == video else None; polarity = COLORS[self.color.get()]
             debug = str(Path(out).parent / ("debug_" + Path(video).stem)) if self.debug.get() else None
@@ -213,6 +263,8 @@ class App:
         r = self.summary; win = tk.Toplevel(self.root); win.title("提取检查结果"); win.geometry("740x420")
         box = tk.Text(win, wrap="word", padx=14, pady=14); box.pack(fill="both", expand=True)
         text = f"源页面：{r['video_pages']}\n谱表行数：{r['score_rows']}\nPDF 页数：{r['pdf_pages']}\n"
+        text += ("分行方式：自动\n" if r.get("bars_per_row") is None
+                 else f"分行方式：每行目标 {r['bars_per_row']} 小节\n")
         if r.get("scroll_joins"):
             text += f"通过翻页补帧连接：{r['scroll_joins']} 处\n"
         text += f"图像边界推定的小节单元：{r['measures']}（完整边界：{r['complete_measure_units']}）\n\n"

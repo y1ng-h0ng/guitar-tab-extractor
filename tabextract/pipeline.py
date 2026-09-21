@@ -13,7 +13,7 @@ from .scroll import make_scroll_bridge
 from .geometry import staff_groups
 from .stitch import assemble_score, stack_rows
 from .pdfout import export_rows
-from .support import check_cancel, validate_options, write_image
+from .support import check_cancel, parse_bars_per_row, validate_options, write_image
 
 
 def inspect_video(video_path, region=None, cancel_event=None):
@@ -74,11 +74,12 @@ def run_pipeline(
     log=print,
     progress_cb=None,
     region=None,
-    bars_per_row=4,
+    bars_per_row=None,
     polarity="auto",
     generate_report=False,
     cancel_event=None,
 ):
+    bars_per_row = parse_bars_per_row(bars_per_row)
     validate_options(sample_fps, dpi, bars_per_row)
     if polarity not in ("auto", "bright", "dark"):
         raise ValueError("谱面颜色模式无效")
@@ -166,6 +167,8 @@ def run_pipeline(
             write_image(debug / f"scroll_{index:02}_clean.png", bridge["page"])
         return bridge
 
+    log("自动分行：按小节宽度与连线安排每行数量，并统一行宽。" if bars_per_row is None
+        else f"自定义分行：每行目标 {bars_per_row} 小节，并统一行宽。")
     result = assemble_score(pages, bars_per_row, log, cancel_event, bridge_provider)
     for item in result.joins:
         if "to_page" in item:
@@ -206,6 +209,7 @@ def run_pipeline(
         "sample_fps": sample_fps,
         "dpi": dpi,
         "bars_per_row": bars_per_row,
+        "row_layout_mode": "auto" if bars_per_row is None else "manual",
         "video_pages": len(pages),
         "pdf_pages": len(layouts),
         "measures": result.measures,
@@ -221,7 +225,7 @@ def run_pipeline(
         "scroll_joins": sum(j["status"] == "joined_scroll" for j in result.joins),
         "rows": result.row_info,
         "crossing_marks": result.crossing_marks,
-        "layout_policy": "以目标小节数为主，跨小节连线处允许局部调整；各行含末行均按最长行统一总宽，优先扩展安全空白，无安全空隙时整行横向缩放。",
+        "layout_policy": "未指定小节数时按小节宽度和连线自动分行；自定义时以目标小节数为主。各行含末行均统一总宽，优先扩展安全空白，无安全空隙时整行横向缩放。",
         "pdf_layout": layouts,
         "note": "小节数由图像边界推定，未进行音高或节奏的语义识别；源视频未显示的内容不会补写。",
     }

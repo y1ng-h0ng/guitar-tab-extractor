@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 from .geometry import staff_groups, bar_lines, trim_vertical
-from .support import check_cancel
+from .support import check_cancel, parse_bars_per_row
 from .background import remove_motion_background
-from .rowlayout import crossing_marks, choose_breaks, justify_row
+from .rowlayout import crossing_marks, choose_breaks, choose_auto_breaks, justify_row
 
 
 @dataclass
@@ -325,10 +325,11 @@ def _measure_units(image, result, run_index):
     return units
 
 
-def assemble_score(pages, bars_per_row=4, log=print, cancel_event=None,
+def assemble_score(pages, bars_per_row=None, log=print, cancel_event=None,
                    bridge_provider=None):
     if not pages:
         raise ValueError("没有可拼接的谱面")
+    bars_per_row = parse_bars_per_row(bars_per_row)
     result = Assembly()
     if all(len(staff_groups(p)) == 1 for p in pages):
         _horizontal_runs(pages, result, log, cancel_event, bridge_provider)
@@ -339,7 +340,8 @@ def assemble_score(pages, bars_per_row=4, log=print, cancel_event=None,
         units = _measure_units(run, result, run_index)
         lines = staff_groups(run)
         crossings = crossing_marks(run, lines[0], [u[5] for u in units]) if lines else [False] * len(units)
-        breaks = choose_breaks(units, crossings, bars_per_row)
+        breaks = (choose_auto_breaks(units, crossings, result.staff_spacing)
+                  if bars_per_row is None else choose_breaks(units, crossings, bars_per_row))
         line_ends = {end for _, end in breaks}
         first_unit = result.measures
         for n, crossing in enumerate(crossings):

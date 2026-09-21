@@ -2,3 +2,4 @@ numpy>=1.24,<3
 opencv-python-headless>=4.8,<5
 Pillow>=10,<13
 reportlab>=4,<5
+tkinterdnd2>=0.6.3,<0.7
