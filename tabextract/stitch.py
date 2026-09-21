@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from .geometry import staff_groups, bar_lines, trim_vertical
 from .support import check_cancel
+from .background import remove_motion_background
 from .rowlayout import crossing_marks, choose_breaks, justify_row
 
 
@@ -181,11 +182,28 @@ def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
                 left = _tracked_match(previous, middle, lines, bridge["first_shift"])
                 right = _tracked_match(middle, current, groups[0], bridge["second_shift"]) if len(groups) == 1 else None
                 if left is not None and right is not None:
+                    # Only verified two-sided bridges may remove scenery.
+                    # Match original evidence first; clean copies afterwards.
+                    mask = bridge.get("background_mask")
+                    removed = 0
+                    if mask is not None:
+                        old = canvas[:, offset:offset + previous.shape[1]]
+                        filtered = remove_motion_background(old, mask)
+                        removed += int(np.count_nonzero(filtered > old))
+                        canvas[:, offset:offset + previous.shape[1]] = filtered
+                        filtered = remove_motion_background(middle, mask, bridge["first_shift"])
+                        removed += int(np.count_nonzero(filtered > middle))
+                        middle = filtered
+                    clean_current = remove_motion_background(
+                        current, mask, bridge["first_shift"] + bridge["second_shift"]
+                    )
+                    removed += int(np.count_nonzero(clean_current > current))
                     canvas, offset = _append_at_seam(canvas, offset, middle, left[1])
-                    canvas, offset = _append_at_seam(canvas, offset, current, right[1])
+                    canvas, offset = _append_at_seam(canvas, offset, clean_current, right[1])
                     result.joins.append({
                         "from_page": i, "to_page": i + 1, "status": "joined_scroll",
-                        **{k: v for k, v in bridge.items() if k != "page"},
+                        **{k: v for k, v in bridge.items() if k not in ("page", "background_mask")},
+                        "background_pixels_removed": removed,
                         "first_match": left[0], "second_match": right[0],
                     })
                     log(f"页面 {i} → {i + 1}：补采 {bridge['samples']} 帧，按滚动位移连接前后谱面")

@@ -2,6 +2,7 @@
 
 import cv2
 import numpy as np
+from .background import motion_background_mask
 
 from .clean import clean_frames, observed_staff, stroke_response
 from .pages import crop_frame, signature
@@ -234,6 +235,7 @@ def make_scroll_bridge(video_path, region, previous_segment, next_segment,
                         horizontal_offsets=positions - anchor)
     upscale = page.shape[1] / frames[0].shape[1]
     return {"page": page, "first_shift": anchor * upscale,
+            "background_mask": motion_background_mask(frames, positions, polarity, cancel_event),
             "second_shift": (distance - anchor) * upscale,
             "start_seconds": start / previous_segment.fps,
             "end_seconds": end / previous_segment.fps,
