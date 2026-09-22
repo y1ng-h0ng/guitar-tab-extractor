@@ -225,7 +225,7 @@ def run_pipeline(
         "scroll_joins": sum(j["status"] == "joined_scroll" for j in result.joins),
         "rows": result.row_info,
         "crossing_marks": result.crossing_marks,
-        "layout_policy": "未指定小节数时按小节宽度和连线自动分行；自定义时以目标小节数为主。各行含末行均统一总宽，优先扩展安全空白，无安全空隙时整行横向缩放。",
+        "layout_policy": "按小节宽度和连线分行；短行优先尝试多放完整小节后适度压缩，自定义时仍以目标数量为主。各行含末行统一总宽；过宽行先收紧安全空白，必要时整行横向缩放，总压缩不超过15%；较短行补充空白对齐。",
         "pdf_layout": layouts,
         "note": "小节数由图像边界推定，未进行音高或节奏的语义识别；源视频未显示的内容不会补写。",
     }

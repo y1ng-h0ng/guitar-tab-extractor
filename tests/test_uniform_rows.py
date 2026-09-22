@@ -30,10 +30,11 @@ def score_with_uneven_measures(connected=False):
 
 
 class UniformRowTests(unittest.TestCase):
-    def test_every_row_including_short_tail_matches_longest_natural_row(self):
+    def test_every_row_including_short_tail_aligns_without_using_widest_outlier(self):
         result = assemble_score([score_with_uneven_measures()], bars_per_row=5, log=lambda _: None)
         self.assertLess(result.row_info[-1]['units'], 5)
-        target = max(x['natural_width'] for x in result.row_info)
+        target = result.row_info[0]['target_width']
+        self.assertLess(target, max(x['natural_width'] for x in result.row_info))
         self.assertGreater(len({x['natural_width'] for x in result.row_info}), 1)
         self.assertEqual({r.shape[1] for r in result.rows}, {target})
         self.assertTrue(all(x['horizontal_scale'] == 1 for x in result.row_info))
@@ -66,7 +67,7 @@ class UniformRowTests(unittest.TestCase):
 
     def test_connected_annotation_uses_whole_row_fallback_without_clipping(self):
         result = assemble_score([score_with_uneven_measures(True)], bars_per_row=5, log=lambda _: None)
-        target = max(x['natural_width'] for x in result.row_info)
+        target = result.row_info[0]['target_width']
         self.assertEqual({r.shape[1] for r in result.rows}, {target})
         stretched = [(row, info) for row, info in zip(result.rows, result.row_info)
                      if info['horizontal_scale'] > 1]

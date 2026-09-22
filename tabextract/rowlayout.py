@@ -54,7 +54,11 @@ def choose_auto_breaks(units, crossings, staff_spacing):
             start = end - count
             width = units[end - 1][3] - units[start][2]
             ratio = width / desired
-            penalty = 1 + 3 * (1 - ratio) ** 2 + 12 * max(0, ratio - 1) ** 2
+            # A little compression is preferable to stretching an underfull
+            # row. Strongly discourage packing beyond the readable allowance.
+            penalty = (1 + 16 * max(0, 1 - ratio) ** 2
+                       + 3 * max(0, ratio - 1) ** 2
+                       + 120 * max(0, ratio - 1.18) ** 2)
             if end < total and crossings[end - 1]:
                 penalty += 100
             cost = costs[start] + penalty
@@ -103,6 +107,74 @@ def choose_breaks(units, crossings, target):
         groups.append((start, end))
         end = start
     return groups[::-1]
+
+
+def borrow_measure(units, crossings, groups, target_width, target_count):
+    """Fill a short manual row with one more whole measure when it fits.
+
+    Keep connected markings together and leave at least three measures (or
+    the requested count for 1/2) in the following row, avoiding a sparse tail.
+    """
+    groups = list(groups)
+    for i in range(len(groups) - 1):
+        start, end = groups[i]
+        next_start, next_end = groups[i + 1]
+        if end != next_start or end - start >= target_count + 1:
+            continue
+        if next_end - end <= min(3, target_count):
+            continue
+        width = units[end - 1][3] - units[start][2]
+        wider = units[end][3] - units[start][2]
+        if (width < target_width * .9 and target_width <= wider <= target_width * 1.18
+                and not crossings[end]):
+            groups[i], groups[i + 1] = (start, end + 1), (end + 1, next_end)
+    return groups
+
+
+def compact_row(row, lines, target_width):
+    """Remove only safe whitespace, preserving every non-string ink column.
+
+    Keep generous space beside glyphs and retain at least 70% of each gap.
+    Continuous annotations and small marks on strings prevent removal.
+    """
+    needed = row.shape[1] - target_width
+    if needed <= 0:
+        return row, []
+    space = float(np.median(np.diff(lines)))
+    ink = row < 245
+    nonstaff = ink.copy()
+    # Only ignore strings which are straight and have constant thickness
+    # locally. A dot, angled stroke or stem on a string stays occupied.
+    horizontal = cv2.morphologyEx(ink.astype(np.uint8), cv2.MORPH_OPEN,
+                                np.ones((1, max(5, round(space))), np.uint8)) > 0
+    band = max(1, round(space * .25))
+    for y in lines:
+        yy = round(y)
+        region = np.s_[max(0, yy - band):yy + band + 1]
+        nonstaff[region] &= ~horizontal[region]
+    occupied = nonstaff.any(axis=0).astype(np.uint8)
+    guard = max(2, round(space * .6))
+    occupied = cv2.dilate(occupied[None, :], np.ones((1, 2 * guard + 1), np.uint8))[0]
+    ink_x = np.where(ink.any(axis=0))[0]
+    if not ink_x.size:
+        return row, []
+    occupied[:ink_x[0] + guard + 1] = 1
+    occupied[max(0, ink_x[-1] - guard):] = 1
+    gaps = [(a, b) for a, b in spans(np.where(occupied == 0)[0])]
+    capacity = np.array([int((b - a + 1) * .3) for a, b in gaps], dtype=int)
+    available = int(capacity.sum())
+    if not available:
+        return row, []
+    remove = min(needed, available)
+    counts = np.diff(np.r_[0, np.rint(np.cumsum(capacity) * remove / available).astype(int)])
+    keep = np.ones(row.shape[1], bool)
+    removed = []
+    for (a, b), count in zip(gaps, counts):
+        if count:
+            x = (a + b - int(count) + 1) // 2
+            keep[x:x + count] = False
+            removed.append({'source_x': int(x), 'pixels': int(count)})
+    return row[:, keep], removed
 
 
 def justify_row(row, lines, target_width):

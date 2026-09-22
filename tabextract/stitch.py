@@ -9,7 +9,8 @@ import numpy as np
 from .geometry import staff_groups, bar_lines, trim_vertical
 from .support import check_cancel, parse_bars_per_row
 from .background import remove_motion_background
-from .rowlayout import crossing_marks, choose_breaks, choose_auto_breaks, justify_row
+from .rowlayout import (crossing_marks, choose_breaks, choose_auto_breaks,
+                        borrow_measure, compact_row, justify_row)
 
 
 @dataclass
@@ -335,6 +336,7 @@ def assemble_score(pages, bars_per_row=None, log=print, cancel_event=None,
         _horizontal_runs(pages, result, log, cancel_event, bridge_provider)
     else:
         _vertical_runs(pages, result, log)
+    plans = []
     for run_index, run in enumerate(result.runs):
         check_cancel(cancel_event)
         units = _measure_units(run, result, run_index)
@@ -342,6 +344,20 @@ def assemble_score(pages, bars_per_row=None, log=print, cancel_event=None,
         crossings = crossing_marks(run, lines[0], [u[5] for u in units]) if lines else [False] * len(units)
         breaks = (choose_auto_breaks(units, crossings, result.staff_spacing)
                   if bars_per_row is None else choose_breaks(units, crossings, bars_per_row))
+        plans.append((run, units, lines, crossings, breaks, result.staff_spacing))
+    if bars_per_row is None:
+        content_width = result.staff_spacing * 74
+    else:
+        full_widths = [units[b - 1][3] - units[a][2]
+                       for _, units, _, _, breaks, _ in plans for a, b in breaks
+                       if b - a >= bars_per_row]
+        content_width = float(np.median(full_widths)) if full_widths else max(
+            units[b - 1][3] - units[a][2]
+            for _, units, _, _, breaks, _ in plans for a, b in breaks)
+    for run_index, (run, units, lines, crossings, breaks, run_spacing) in enumerate(plans):
+        check_cancel(cancel_event)
+        if bars_per_row is not None:
+            breaks = borrow_measure(units, crossings, breaks, content_width, bars_per_row)
         line_ends = {end for _, end in breaks}
         first_unit = result.measures
         for n, crossing in enumerate(crossings):
@@ -355,11 +371,11 @@ def assemble_score(pages, bars_per_row=None, log=print, cancel_event=None,
             left, right = group[0][2], group[-1][3]
             # Three-digit measure labels often start well left of their bar.
             # Leave room to carry the complete label to the following row.
-            side = round(result.staff_spacing * 2)
+            side = round(run_spacing * 2)
             row = np.pad(run[:, left:right], ((0, 0), (side, side)), constant_values=255)
             if lines:
                 top = lines[0][0]
-                space = result.staff_spacing
+                space = run_spacing
                 label_top = max(0, round(top - space * 1.15))
                 label_bottom = max(label_top + 1, round(top - space * 0.16))
                 for boundary, is_left in [(group[0][4], True), (group[-1][5], False)]:
@@ -391,22 +407,28 @@ def assemble_score(pages, bars_per_row=None, log=print, cancel_event=None,
             result.rows.append(row)
             result.measures += count
             result.complete_measures += complete
-    target_width = max(row.shape[1] for row in result.rows)
+    longest = max(row.shape[1] for row in result.rows)
+    # Use a comfortable line length, not the widest outlier. Limit whole-row
+    # horizontal compression to 15%, including continuous connected markings.
+    target_width = min(longest, max(round(content_width) + 2 * round(result.staff_spacing * 2),
+                                    int(np.ceil(longest * .85))))
     for index, (row, info) in enumerate(zip(result.rows, result.row_info)):
         info["natural_width"] = row.shape[1]
         info["space_insertions"] = []
+        info["space_removals"] = []
         info["target_width"] = target_width
         info["horizontal_scale"] = 1.0
         groups = staff_groups(row)
         if groups:
-            expanded, inserts = justify_row(row, groups[0], target_width)
+            compacted, removals = compact_row(row, groups[0], target_width)
+            info["space_removals"] = removals
+            expanded, inserts = justify_row(compacted, groups[0], target_width)
             result.rows[index] = expanded
             info["width"] = expanded.shape[1]
             info["space_insertions"] = inserts
-        if result.rows[index].shape[1] < target_width:
-            # A fully connected marking may leave no safe insertion column.
-            # Resize the complete row as a last resort, never split its ink
-            # or merely pad the canvas while leaving the score itself short.
+        if result.rows[index].shape[1] != target_width:
+            # Connected markings may leave too little safe whitespace.
+            # Resize the complete row only as a last resort; no glyph is cut.
             source = result.rows[index]
             result.rows[index] = cv2.resize(source, (target_width, source.shape[0]),
                                              interpolation=cv2.INTER_LANCZOS4)
