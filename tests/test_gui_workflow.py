@@ -22,6 +22,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.video = Path(self.temp.name) / '测试 视频 {第一首}.MP4'
         self.video.touch()
         self.app = gui.App(self.root)
+        self.addCleanup(self.app.source.close)
 
     def close_root(self):
         for callback in self.root.tk.splitlist(self.root.tk.call('after', 'info')):
@@ -75,6 +76,50 @@ class GuiWorkflowTests(unittest.TestCase):
         with patch('gui.run_pipeline') as run:
             self.app.start()
             run.assert_not_called()
+
+    def test_pasted_url_tracks_output_and_preserves_preview_region(self):
+        self.drop(self.video)
+        url = 'https://example.com/watch?v=123'
+        self.app.video.set('分享谱子：' + url + ' 复制链接')
+        self.assertEqual(self.app.output.get(), gui.default_output(url))
+        self.assertEqual(self.app.valid_video(), url)
+        region = (1, 2, 300, 200)
+        with patch.object(self.app, 'launch', side_effect=lambda fn: fn()), \
+                patch.object(self.app.source, 'resolve', return_value=str(self.video)) as resolve, \
+                patch('gui.inspect_video', return_value=(region, {}, 'frame')):
+            self.app.preview()
+            self.assertEqual(resolve.call_args.args, (url,))
+            self.assertEqual(self.app.events.get_nowait(), ('preview', ('frame', region, url)))
+        self.app.apply_region(region, url)
+        with patch.object(self.app, 'launch', side_effect=lambda fn: fn()), \
+                patch.object(self.app.source, 'resolve', return_value=str(self.video)), \
+                patch.object(self.app.source, 'close') as close, patch('gui.run_pipeline') as run:
+            self.app.start()
+            self.assertEqual(run.call_args.args[0], str(self.video))
+            self.assertEqual(run.call_args.kwargs['region'], region)
+            self.assertEqual(run.call_args.kwargs['source_url'], url)
+            close.assert_called_once()
+        self.app.video.set('https://example.com/another')
+        self.assertIsNone(self.app.region)
+        self.assertEqual(self.app.output.get(), gui.default_output(self.app.video.get()))
+
+    def test_partial_url_typing_and_custom_output_are_safe(self):
+        for text in ('h', 'https:', 'https://', 'https://example.com'):
+            self.app.video.set(text)
+        self.assertEqual(self.app.output.get(), gui.default_output('https://example.com'))
+        self.app.output.set('自定义.pdf')
+        self.app.video.set('https://example.com/new')
+        self.assertEqual(self.app.output.get(), '自定义.pdf')
+
+    def test_failed_download_never_calls_pipeline_and_releases_cache(self):
+        self.app.video.set('https://example.com/video')
+        with patch.object(self.app, 'launch', side_effect=lambda fn: fn()), \
+                patch.object(self.app.source, 'resolve', side_effect=RuntimeError('链接获取失败')), \
+                patch.object(self.app.source, 'close') as close, patch('gui.run_pipeline') as run:
+            with self.assertRaisesRegex(RuntimeError, '链接获取失败'):
+                self.app.start()
+            run.assert_not_called()
+            close.assert_called_once()
 
 
 if __name__ == '__main__':

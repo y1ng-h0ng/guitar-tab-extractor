@@ -3,3 +3,4 @@ opencv-python-headless>=4.8,<5
 Pillow>=10,<13
 reportlab>=4,<5
 tkinterdnd2>=0.6.3,<0.7
+yt-dlp>=2026.8.19

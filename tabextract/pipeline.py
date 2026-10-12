@@ -78,6 +78,7 @@ def run_pipeline(
     polarity="auto",
     generate_report=False,
     cancel_event=None,
+    source_url=None,
 ):
     bars_per_row = parse_bars_per_row(bars_per_row)
     validate_options(sample_fps, dpi, bars_per_row)
@@ -202,6 +203,7 @@ def run_pipeline(
     report_path = out.with_suffix(".report.json") if generate_report else None
     summary = {
         "source_video": source.name,
+        "source_url": source_url,
         "region": list(region),
         "region_confidence": confidence,
         "manual_region": manual,

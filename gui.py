@@ -14,6 +14,7 @@ try:
 except ImportError as error:
     raise SystemExit("缺少图形界面依赖，请安装官方 Python（包含 Tcl/Tk）和 requirements.txt。") from error
 from tabextract import run_pipeline
+from tabextract.download import VideoSource, video_url, default_output
 from tabextract.pipeline import inspect_video
 from tabextract.support import CancelledError, open_file, parse_bars_per_row, validate_options
 
@@ -85,12 +86,13 @@ class App:
         self.root = root; root.title("吉他谱视频提取工具"); root.geometry("860x660"); root.minsize(740, 580)
         self.events = queue.Queue(); self.worker = None; self.cancel_event = threading.Event(); self.closing = False
         self.region = None; self.region_source = None; self.summary = None; self.preview_path = None
+        self.source = VideoSource(); self.previous_input = ""
         self.video = tk.StringVar(); self.output = tk.StringVar(); self.fps = tk.StringVar(value="6"); self.dpi = tk.StringVar(value="300"); self.bars = tk.StringVar(value="自动")
         self.color = tk.StringVar(value="自动识别"); self.debug = tk.BooleanVar(value=False); self.report = tk.BooleanVar(value=False)
-        self.status = tk.StringVar(value="拖入视频，点击“一键生成”；每行小节默认自动安排。"); self.region_text = tk.StringVar(value="自动定位谱面")
+        self.status = tk.StringVar(value="拖入视频或粘贴视频分享链接，点击“一键生成”。"); self.region_text = tk.StringVar(value="自动定位谱面")
         frame = ttk.Frame(root, padding=18); frame.pack(fill="both", expand=True); frame.columnconfigure(1, weight=1); frame.rowconfigure(8, weight=1)
         ttk.Label(frame, text="从演示视频整理吉他谱", font=("Microsoft YaHei UI", 17, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 16))
-        ttk.Label(frame, text="视频（可拖入）").grid(row=1, column=0, sticky="w", padx=(0, 10))
+        ttk.Label(frame, text="视频 / 分享链接").grid(row=1, column=0, sticky="w", padx=(0, 10))
         self.video_entry = ttk.Entry(frame, textvariable=self.video); self.video_entry.grid(row=1, column=1, sticky="ew", pady=5)
         self.pick_btn = ttk.Button(frame, text="选择视频", command=self.pick_video); self.pick_btn.grid(row=1, column=2, padx=(10, 0))
         ttk.Label(frame, text="输出 PDF").grid(row=2, column=0, sticky="w"); ttk.Entry(frame, textvariable=self.output).grid(row=2, column=1, sticky="ew", pady=5); ttk.Button(frame, text="保存位置", command=self.pick_output).grid(row=2, column=2, padx=(10, 0))
@@ -128,15 +130,32 @@ class App:
         except (RuntimeError, tk.TclError):
             pass
         if not self.drop_enabled:
-            self.status.set("点击“选择视频”后即可一键生成；重新运行安装脚本可启用视频拖放。")
+            self.status.set("选择视频或粘贴分享链接后即可一键生成；重新运行安装脚本可启用拖放。")
+        self.video.trace_add("write", self.input_changed)
         root.protocol("WM_DELETE_WINDOW", self.close); root.after(80, self.poll)
+
+    def input_changed(self, *_):
+        if self.worker and self.worker.is_alive(): return
+        current = self.video.get().strip(); old = self.previous_input
+        self.previous_input = current
+        self.source.close(); self.reset_region()
+        try:
+            old_default = default_output(old)
+        except ValueError:
+            old_default = ""
+        if not self.output.get() or self.output.get() == old_default:
+            try:
+                self.output.set(default_output(current) if current else "")
+            except ValueError:
+                # Partial URLs are expected while typing; validate when starting.
+                self.output.set("")
+        self.summary = None
+        self.open_btn.config(state="disabled"); self.report_btn.config(state="disabled")
 
     def select_video(self, path):
         if self.worker and self.worker.is_alive():
             return False
-        old = self.video.get(); self.video.set(path); self.reset_region()
-        if not self.output.get() or self.output.get() == os.path.splitext(old)[0] + "_吉他谱.pdf":
-            self.output.set(os.path.splitext(path)[0] + "_吉他谱.pdf")
+        self.video.set(path)
         self.summary = None
         self.open_btn.config(state="disabled"); self.report_btn.config(state="disabled")
         self.status.set("视频已就绪，点击“一键生成”即可；也可在“每行小节”中自定义。")
@@ -172,8 +191,15 @@ class App:
 
     def valid_video(self):
         path = self.video.get().strip()
-        if not Path(path).is_file(): raise ValueError("请先选择有效的视频文件")
+        url = video_url(path)
+        if url: return url
+        if not Path(path).is_file(): raise ValueError("请选择有效的视频文件或粘贴视频分享链接")
         return path
+
+    def resolve_video(self, source):
+        return self.source.resolve(source, cancel_event=self.cancel_event,
+            log=lambda msg: self.events.put(("log", msg)),
+            progress_cb=lambda pct, msg: self.events.put(("progress", (pct * .2, msg))))
 
     def busy(self, value):
         for b in (self.run_btn, self.preview_btn, self.auto_btn, self.pick_btn, self.video_entry): b.config(state="disabled" if value else "normal")
@@ -184,8 +210,10 @@ class App:
         self.cancel_event.clear(); self.busy(True)
         def task():
             try: fn()
-            except CancelledError: self.events.put(("cancelled", None))
-            except Exception: self.events.put(("error", traceback.format_exc()))
+            except CancelledError:
+                self.source.close(); self.events.put(("cancelled", None))
+            except Exception:
+                self.source.close(); self.events.put(("error", traceback.format_exc()))
             finally: self.events.put(("finished", None))
         self.worker = threading.Thread(target=task, daemon=True); self.worker.start()
 
@@ -194,9 +222,10 @@ class App:
         except ValueError as error: messagebox.showerror("视频文件", str(error)); return
         self.status.set("正在读取预览并定位谱面 ..."); self.preview_path = path; selected = self.region if self.region_source == path else None
         def task():
-            try: region, _, frame = inspect_video(path, selected, self.cancel_event)
+            local = self.resolve_video(path)
+            try: region, _, frame = inspect_video(local, selected, self.cancel_event)
             except ValueError:
-                cap = cv2.VideoCapture(path)
+                cap = cv2.VideoCapture(local)
                 try:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // 5)); ok, frame = cap.read()
                     if not ok: raise OSError("无法读取预览")
@@ -212,15 +241,21 @@ class App:
         if self.worker and self.worker.is_alive(): return
         try:
             video = self.valid_video(); fps = float(self.fps.get()); dpi = int(self.dpi.get()); bars = parse_bars_per_row(self.bars.get()); validate_options(fps, dpi, bars)
-            out = self.output.get().strip() or os.path.splitext(video)[0] + "_吉他谱.pdf"; self.output.set(out)
+            out = self.output.get().strip() or default_output(video); self.output.set(out)
+            if Path(out).suffix.lower() != '.pdf': raise ValueError("输出文件需要使用 .pdf 扩展名")
             region = self.region if self.region_source == video else None; polarity = COLORS[self.color.get()]
-            debug = str(Path(out).parent / ("debug_" + Path(video).stem)) if self.debug.get() else None
+            debug = str(Path(out).parent / ("debug_" + Path(out).stem)) if self.debug.get() else None
             generate_report = self.report.get()
         except (ValueError, KeyError) as error: messagebox.showerror("检查设置", str(error)); return
         self.summary = None; self.open_btn.config(state="disabled"); self.report_btn.config(state="disabled"); self.progress["value"] = 0
         self.log_text.config(state="normal"); self.log_text.delete("1.0", "end"); self.log_text.config(state="disabled")
         def task():
-            summary = run_pipeline(video, out, sample_fps=fps, dpi=dpi, bars_per_row=bars, region=region, polarity=polarity, debug_dir=debug, generate_report=generate_report, cancel_event=self.cancel_event, log=lambda msg: self.events.put(("log", msg)), progress_cb=lambda pct, msg: self.events.put(("progress", (pct, msg))))
+            linked = video_url(video)
+            try:
+                local = self.resolve_video(video)
+                summary = run_pipeline(local, out, sample_fps=fps, dpi=dpi, bars_per_row=bars, region=region, polarity=polarity, debug_dir=debug, generate_report=generate_report, cancel_event=self.cancel_event, log=lambda msg: self.events.put(("log", msg)), progress_cb=lambda pct, msg: self.events.put(("progress", (20 + pct * .8 if linked else pct, msg))), source_url=linked)
+            finally:
+                self.source.close()
             self.events.put(("done", summary))
         self.launch(task)
 
@@ -246,7 +281,7 @@ class App:
                     if not self.closing: messagebox.showerror("处理失败", payload.strip().splitlines()[-1])
                 elif kind == "finished":
                     self.busy(False)
-                    if self.closing: self.root.destroy(); return
+                    if self.closing: self.source.close(); self.root.destroy(); return
         except queue.Empty: pass
         self.root.after(80, self.poll)
 
@@ -278,7 +313,7 @@ class App:
 
     def close(self):
         if self.worker and self.worker.is_alive(): self.closing = True; self.cancel()
-        else: self.root.destroy()
+        else: self.source.close(); self.root.destroy()
 
 
 def main():
