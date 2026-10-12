@@ -18,6 +18,7 @@ def motion_background_mask(frames, positions, polarity, cancel_event=None):
     Equal screen positions get one vote, regardless of how long playback
     pauses there. Otherwise a stationary guitar can outvote scrolling notes.
     Small registration/antialiasing differences get a one-pixel allowance.
+    Atlas values: 0 retain/unknown, 1 ambiguous absence, 2 strict absence.
     """
     positions = np.asarray(positions, dtype=float)
     if (len(frames) < 3 or len(positions) != len(frames)
@@ -54,8 +55,15 @@ def motion_background_mask(frames, positions, polarity, cancel_event=None):
         # as evidence of absence.
         votes[:, start + 2:start + width - 2] += support[:, 2:-2]
         coverage[start + 2:start + width - 2] += 1
-    return ((coverage[None, :] >= 2)
+    mask = ((coverage[None, :] >= 2)
             & (votes * 2 <= coverage[None, :])).astype(np.uint8)
+    # Distinguish an ambiguous majority from unanimous absence in at least
+    # two independent views, or absence at >= 75% of at least four positions.
+    # Pauses never add votes.
+    strict = (((coverage[None, :] >= 2) & (votes == 0))
+              | ((coverage[None, :] >= 4) & (votes * 4 <= coverage[None, :])))
+    mask[strict] = 2
+    return mask
 
 
 def remove_motion_background(page, mask, offset=0):
@@ -69,16 +77,26 @@ def remove_motion_background(page, mask, offset=0):
     scale = page.shape[0] / mask.shape[0]
     transform = np.float32([[scale, 0, (scale - 1) / 2 - offset],
                            [0, scale, (scale - 1) / 2]])
-    remove = cv2.warpAffine(mask, transform, page.shape[::-1],
-                           flags=cv2.INTER_NEAREST, borderValue=0) > 0
+    evidence = cv2.warpAffine(mask, transform, page.shape[::-1],
+                             flags=cv2.INTER_NEAREST, borderValue=0)
+    remove = evidence > 0
+    if not remove.any():
+        return page
     groups = staff_groups(page)
     if not groups:
         return page
     ink = (page < 245).astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
     protect = np.zeros(count, bool)
+    notation_zone = np.zeros(page.shape, bool)
     for lines in groups:
         space = float(np.median(np.diff(lines)))
+        # Keep fret numbers, articulation dots, ties and the lower rhythm
+        # envelope regardless of absence votes. Only detached outer scenery
+        # can lose the conservative small-component exemption below.
+        a = max(0, round(lines[0] - space * .65))
+        b = min(page.shape[0], round(lines[-1] + space * 2.5) + 1)
+        notation_zone[a:b] = True
         # Horizontal strings are often faint over light video backgrounds.
         for line in lines:
             y, radius = round(line), max(1, round(scale))
@@ -92,7 +110,7 @@ def remove_motion_background(page, mask, offset=0):
                     and y + h <= lines[-1] + 4 * space):
                 protect[i] = True
         vertical = cv2.morphologyEx(
-            ink, cv2.MORPH_OPEN, np.ones((max(3, round(space * .85)), 1), np.uint8)
+            ink, cv2.MORPH_OPEN, np.ones((max(3, round(space * .85)) | 1, 1), np.uint8)
         )
         n, parts, bounds, _ = cv2.connectedComponentsWithStats(vertical, 8)
         keep = np.zeros(n, np.uint8)
@@ -102,7 +120,23 @@ def remove_motion_background(page, mask, offset=0):
         radius = max(1, round(scale))
         stems = cv2.dilate(keep[parts], np.ones((radius, radius), np.uint8))
         remove[stems > 0] = False
+        stem_guard = max(1, round(space * .35))
+        notation_zone |= cv2.dilate(stems, np.ones((2 * stem_guard + 1,
+                                                    2 * stem_guard + 1), np.uint8)) > 0
     remove[protect[labels]] = False
     result = page.copy()
     result[remove] = 255
+    # Assess whole surviving components; never shave pixels off a letter or
+    # remove a mark solely because it is small. One supported edge, proximity
+    # to notation, or insufficient independent views leaves it untouched.
+    n, pieces, bounds, _ = cv2.connectedComponentsWithStats((result < 245).astype(np.uint8), 8)
+    discard = np.zeros(n, bool)
+    for i in range(1, n):
+        x, y, w, h, _ = bounds[i]
+        region = np.s_[y:y + h, x:x + w]
+        component = pieces[region] == i
+        if (not notation_zone[region][component].any()
+                and np.all(evidence[region][component] == 2)):
+            discard[i] = True
+    result[discard[pieces]] = 255
     return result

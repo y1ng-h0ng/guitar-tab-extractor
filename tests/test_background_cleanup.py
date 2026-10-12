@@ -13,6 +13,31 @@ from test_scroll_bridge import scrolling_score
 
 
 class BackgroundCleanupTests(unittest.TestCase):
+    def test_strict_absence_removes_only_whole_detached_outer_fragments(self):
+        page = np.full((180, 480), 255, np.uint8)
+        for y in range(70, 121, 10):
+            cv2.line(page, (5, y), (475, y), 0, 1)
+        cv2.line(page, (50, 35), (62, 38), 0, 1)  # Detached scenery.
+        cv2.putText(page, 'P', (100, 45), cv2.FONT_HERSHEY_SIMPLEX, .45, 0, 1)
+        cv2.circle(page, (150, 65), 1, 0, -1)  # Articulation near the staff.
+        cv2.line(page, (210, 28), (210, 167), 0, 1)
+        # A flag next to an extended stem must be protected too.
+        cv2.line(page, (212, 30), (214, 36), 0, 1)
+        mask = np.full(page.shape, 2, np.uint8)
+        # Even one supported edge disqualifies an entire compact glyph.
+        coords = np.argwhere(page[30:46, 100:116] == 0)
+        yy, xx = coords[0] + [30, 100]
+        mask[yy, xx] = 0
+        original = page.copy()
+        result = remove_motion_background(page, mask)
+        self.assertTrue(np.all(result[30:42, 45:68] == 255))
+        for a,b,c,d in [(95,30,120,50), (145,60,155,69), (205,25,220,170), (5,69,475,122)]:
+            np.testing.assert_array_equal(result[b:d,a:c], page[b:d,a:c])
+        np.testing.assert_array_equal(page, original)
+        # Older/ambiguous masks must retain the small fragment exemption.
+        conservative = remove_motion_background(page, np.minimum(mask, 1))
+        np.testing.assert_array_equal(conservative[30:42,45:68], page[30:42,45:68])
+
     def test_fixed_cable_is_removed_without_cutting_notes_stems_or_ties(self):
         for polarity in ("bright", "dark"):
             with self.subTest(polarity=polarity):
