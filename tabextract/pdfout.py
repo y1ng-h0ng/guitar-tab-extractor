@@ -152,7 +152,10 @@ def export_rows(rows, out_path, dpi=300, staff_spacing=21.0, title="吉他谱", 
         for number, placements in enumerate(layouts, 1):
             check_cancel(cancel_event)
             canvas.setFillColorRGB(0.12, 0.15, 0.18)
-            canvas.setFont(font_name, 17 if number == 1 else 10)
+            preferred_size = 17 if number == 1 else 10
+            title_width = pdfmetrics.stringWidth(title, font_name, 1)
+            canvas.setFont(font_name, min(preferred_size,
+                           (page_w - 2 * 42.52) / max(title_width, 1)))
             canvas.drawString(42.52, page_h - (43 if number == 1 else 33), title)
             if number == 1:
                 canvas.setFont(font_name, 9)

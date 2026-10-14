@@ -38,9 +38,16 @@ def infer_polarity(bgr):
 def observed_staff(bgr, polarity):
     """Locate staff lines in source evidence before consensus can reject them."""
     response = stroke_response(bgr, polarity, kernel=5).astype(np.int16)
-    return staff_groups(
-        255 - np.clip(response * 3, 0, 255).astype(np.uint8), coverage=0.18
-    )
+    strong = 255 - np.clip(response * 3, 0, 255).astype(np.uint8)
+    groups = staff_groups(strong, coverage=0.40)
+    if not groups:
+        # Translucent strings may have much less contrast than the notes.
+        # Prefer wide six-line evidence to short bright alignments from
+        # repeated fret digits, which can otherwise imply a false tiny staff.
+        groups = staff_groups(
+            np.where(response >= 15, 0, 255).astype(np.uint8), coverage=0.40
+        )
+    return groups or staff_groups(strong, coverage=0.18)
 
 
 def _restore_stem_evidence(page, low, median, high, groups, upscale):
