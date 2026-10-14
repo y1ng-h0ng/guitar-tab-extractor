@@ -20,7 +20,11 @@ def stroke_response(bgr, polarity="bright", kernel=9):
     response = cv2.morphologyEx(
         gray, cv2.MORPH_TOPHAT, np.ones((kernel, kernel), np.uint8)
     )
-    response[neutral < 50] = 0
+    # Translucent notation can be darker than 50 on dark footage. Require
+    # contrast in the weakest colour channel instead of absolute brightness.
+    local = cv2.morphologyEx(neutral, cv2.MORPH_TOPHAT,
+                            np.ones((kernel, kernel), np.uint8))
+    response[(neutral < 50) & (local < 8)] = 0
     return response
 
 
@@ -28,10 +32,14 @@ def infer_polarity(bgr):
     """Use long-line evidence rather than total dark/bright background area."""
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.int16)
     above, below = np.roll(gray, 2, axis=0), np.roll(gray, -2, axis=0)
-    scores = []
-    for sign in (1, -1):
-        ridge = np.minimum(sign * (gray - above), sign * (gray - below)) > 25
-        scores.append(float(np.sort(ridge.mean(axis=1))[-12:].sum()))
+    scores = [0., 0.]
+    for threshold in (25, 12, 6):
+        scores = []
+        for sign in (1, -1):
+            ridge = np.minimum(sign * (gray - above), sign * (gray - below)) > threshold
+            scores.append(float(np.sort(ridge.mean(axis=1))[-12:].sum()))
+        if max(scores) >= 1.0 and abs(scores[0]-scores[1]) >= .1:
+            break
     return "bright" if scores[0] >= scores[1] else "dark"
 
 
@@ -178,7 +186,9 @@ def _covered_percentiles(features, offsets, upscale, minimum=3):
 
 
 def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None,
-                 horizontal_offsets=None):
+                 horizontal_offsets=None, detail_gain=1.0, diagnostics=None):
+    if not np.isfinite(detail_gain) or not 0.5 <= detail_gain <= 2.0:
+        raise ValueError("局部细节保留系数需要在 0.5–2.0 之间")
     if not frames:
         raise ValueError("没有用于清洗的帧")
     if horizontal_offsets is not None:
@@ -223,6 +233,8 @@ def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None,
             features, horizontal_offsets, upscale
         )
     del features
+    # Gain is local to this stable segment; never relax temporal support.
+    low, supported, median, high = [v * detail_gain for v in (low, supported, median, high)]
     alpha = np.clip((high - 8) * (255 / 35), 0, 255)
     strong = (low < 10) & (supported >= 10) & (high >= 60)
     nearby = cv2.dilate(
@@ -249,6 +261,7 @@ def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None,
                 page[a:b], np.where(valid, 255 - line_alpha, 255).astype(np.uint8)
             )
     if groups:
+        _restore_faint_details(page, low, high, groups, upscale)
         _restore_stem_evidence(page, low, median, high, groups, upscale)
         _restore_compact_evidence(page, median, high, groups)
         _sharpen_annotations(page, median, high, groups, upscale)
@@ -269,7 +282,68 @@ def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None,
             h = stats[i, cv2.CC_STAT_HEIGHT]
             keep[i] = zone[y : y + h].any()
         page[~keep[labels]] = 255
+    if diagnostics is not None:
+        diagnostics.extend(detail_issues(page, median, high, groups, upscale))
     return page
+
+
+def _restore_faint_details(page, low, high, groups, upscale):
+    """Enhance persistent faint compact marks without filling unsupported gaps."""
+    evidence = ((low >= 8) & (high >= 15)).astype(np.uint8)
+    for lines in groups:
+        space = float(np.median(np.diff(lines)))
+        # Disconnect strings for component classification, not for drawing.
+        mask = evidence.copy()
+        for line in lines:
+            y = round(line)
+            mask[max(0, y-upscale):y+upscale+1] = 0
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        for i in range(1, n):
+            x, y, w, h, area = stats[i]
+            if not (lines[0]-4*space <= y and y+h <= lines[-1]+4*space
+                    and w <= 3*space and h <= 3.5*space and area >= upscale):
+                continue
+            region = np.s_[y:y+h, x:x+w]
+            component = labels[region] == i
+            strength = float(np.percentile(high[region][component], 80))
+            if strength >= 40:
+                continue
+            alpha = np.clip((high[region]-5) * 255 / max(12, strength-5), 0, 255)
+            patch = page[region]
+            patch[component] = np.minimum(patch[component], (255-alpha[component]).astype(np.uint8))
+
+
+def detail_issues(page, majority, high, groups, upscale):
+    """Image evidence only: flag uncertain losses/crops, never claim a pitch."""
+    if not groups:
+        return []
+    evidence = ((majority >= 8) & (high >= 18)).astype(np.uint8)
+    retained_ink = (page < 200).astype(np.uint8)
+    for lines in groups:
+        for line in lines:
+            y = round(line)
+            evidence[max(0, y-upscale):y+upscale+1] = 0
+            retained_ink[max(0, y-upscale):y+upscale+1] = 0
+    nearby_ink = cv2.dilate(retained_ink, np.ones((2*upscale+1, 2*upscale+1), np.uint8))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(evidence, 8)
+    issues = []
+    for i in range(1, n):
+        x, y, w, h, area = map(int, stats[i])
+        if area < 2*upscale*upscale or min(w, h) < max(2, upscale) or not any(
+                lines[0]-4*(s := float(np.median(np.diff(lines)))) <= y
+                and y+h <= lines[-1]+4*s and w <= 3*s and h <= 4*s for lines in groups):
+            continue
+        component = labels[y:y+h, x:x+w] == i
+        retained = float((page[y:y+h, x:x+w][component] < 200).mean())
+        nearby = float(nearby_ink[y:y+h, x:x+w][component].mean())
+        clipped = y <= upscale or y+h >= page.shape[0]-upscale
+        # Antialiased fringes beside a retained glyph are not missing notes.
+        if (retained < .35 and nearby < .6) or clipped:
+            issues.append({"kind": "clipped" if clipped else "faint_detail",
+                           "message": "笔画靠近上下裁切边界，请核对" if clipped else "弱笔画可能未完整保留，请核对",
+                           "bbox": [x, y, w, h], "retained_fraction": retained})
+    return sorted(issues, key=lambda item: (item["kind"] == "clipped",
+                  item["bbox"][2]*item["bbox"][3]), reverse=True)[:12]
 
 
 def clean_page(bgr_img, upscale=3, **_compat):

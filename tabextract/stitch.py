@@ -23,6 +23,7 @@ class Assembly:
     complete_measures: int = 0
     staff_spacing: float = 21.0
     runs: list = field(default_factory=list)
+    run_sources: list = field(default_factory=list)
     crossing_marks: list = field(default_factory=list)
 
 
@@ -84,16 +85,26 @@ def find_horizontal_shift(a, b, lines):
     sa = cv2.resize(fa, (width // factor, a.shape[0] // factor), interpolation=cv2.INTER_AREA)
     sb = cv2.resize(fb, sa.shape[::-1], interpolation=cv2.INTER_AREA)
     tw = max(50, round(sa.shape[1] * 0.23))
-    response = cv2.matchTemplate(sa, sb[:, :tw], cv2.TM_CCOEFF_NORMED)[0]
-    work = response.copy()
-    work[: max(3, round(len(work) * 0.03))] = -1
+    # A cursor or half-cut fret at the left edge should not hide an otherwise
+    # sound overlap. Search several interior anchors, then verify the entire
+    # overlap and measure labels exactly as for a prefix candidate.
+    proposals = []
+    for anchor in (0, round(sa.shape[1] * .12), round(sa.shape[1] * .26)):
+        template = sb[:, anchor:anchor+tw]
+        if np.linalg.norm(template) < 1e-6:
+            continue
+        work = cv2.matchTemplate(sa, template, cv2.TM_CCOEFF_NORMED)[0]
+        work[:anchor + max(3, round(sa.shape[1]*.02))] = -1
+        for _ in range(6):
+            pos = int(np.argmax(work))
+            score = float(work[pos])
+            if score < .55:
+                break
+            proposals.append(((pos-anchor)*factor, score))
+            win = max(12, round(sa.shape[1]*.07))
+            work[max(0, pos-win):pos+win+1] = -1
     candidates = []
-    for _ in range(6):
-        pos = int(np.argmax(work))
-        score = float(work[pos])
-        if score < 0.55:
-            break
-        shift = pos * factor
+    for shift, score in proposals:
         best = None
         for dx in range(max(1, shift - factor), min(width - tw * factor, shift + factor) + 1):
             ov = min(width - dx, b.shape[1])
@@ -101,9 +112,12 @@ def find_horizontal_shift(a, b, lines):
             if best is None or match > best[1]:
                 best = (dx, match)
         if best and best[1] > 0.72 and _bar_labels_consistent(a, b, lines, best[0]):
-            candidates.append({"shift": best[0], "score": score, "overlap_score": best[1], "duplicate": False})
-        win = max(12, round(sa.shape[1] * 0.07))
-        work[max(0, pos - win) : pos + win + 1] = -1
+            candidate = {"shift": best[0], "score": score, "overlap_score": best[1], "duplicate": False}
+            near = next((c for c in candidates if abs(c["shift"]-best[0]) <= max(3, factor*2)), None)
+            if near is None:
+                candidates.append(candidate)
+            elif (candidate["overlap_score"], candidate["score"]) > (near["overlap_score"], near["score"]):
+                near.update(candidate)
     if not candidates:
         return None
     candidates.sort(key=lambda d: d["overlap_score"], reverse=True)
@@ -165,6 +179,7 @@ def _tracked_match(previous, current, lines, expected_shift):
 
 def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
     canvas = pages[0].copy()
+    sources = [1]
     previous = pages[0]
     offset = 0
     lines = staff_groups(previous)[0]
@@ -209,6 +224,7 @@ def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
                     })
                     log(f"页面 {i} → {i + 1}：补采 {bridge['samples']} 帧，按滚动位移连接前后谱面")
                     previous = current
+                    sources.append(i+1)
                     lines = staff_groups(previous)[0]
                     continue
                 expected = bridge["first_shift"] + bridge["second_shift"]
@@ -221,9 +237,12 @@ def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
             result.warnings.append(f"源页面 {i} → {i + 1} 的重叠未能可靠确认，已分别保留；请核对接缝。")
             result.joins.append({"from_page": i, "to_page": i + 1, "status": "unresolved"})
             result.runs.append(canvas)
+            result.run_sources.append(sources)
+            sources = [i+1]
             canvas = current.copy()
             offset = 0
         elif match["duplicate"]:
+            sources.append(i+1)
             result.joins.append({"from_page": i, "to_page": i + 1, "status": "same_view", **match})
             log(f"页面 {i} → {i + 1}：同一画面，无新增谱面")
             previous = current
@@ -234,9 +253,12 @@ def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
                 result.warnings.append(f"源页面 {i} → {i + 1} 虽有像素重叠，但未确认共同小节线，已分别保留。")
                 result.joins.append({"from_page": i, "to_page": i + 1, "status": "unresolved_bar", **match})
                 result.runs.append(canvas)
+                result.run_sources.append(sources)
+                sources = [i+1]
                 canvas = current.copy()
                 offset = 0
             else:
+                sources.append(i+1)
                 ca, cb = seam
                 canvas, offset = _append_at_seam(canvas, offset, current, seam)
                 result.joins.append({"from_page": i, "to_page": i + 1, "status": "joined", "seam_previous": ca, "seam_current": cb, **match})
@@ -246,6 +268,7 @@ def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
         if groups:
             lines = groups[0]
     result.runs.append(canvas)
+    result.run_sources.append(sources)
 
 
 def _system_crops(page):
@@ -284,6 +307,7 @@ def _vertical_runs(pages, result, log):
                     break
             result.joins.append({"from_page": i, "to_page": i + 1, "status": "systems", "overlap_systems": matched})
         result.runs.extend(systems[matched:])
+        result.run_sources.extend([[i+1] for _ in systems[matched:]])
         previous = sigs
         log(f"页面 {i + 1}：{len(systems)} 个谱表，页首重叠 {matched} 个")
 
@@ -405,6 +429,7 @@ def assemble_score(pages, bars_per_row=None, log=print, cancel_event=None,
             complete = sum(int(unit[1]) for unit in group)
             result.row_info.append({"run": run_index + 1, "first_unit": result.measures + 1, "units": count, "complete": complete, "width": row.shape[1], "height": row.shape[0], "target_units": bars_per_row, "end_of_run": end == len(units), "break_after_connected_mark": bool(crossings[end - 1])})
             result.rows.append(row)
+            result.row_info[-1]["source_pages"] = result.run_sources[run_index]
             result.measures += count
             result.complete_measures += complete
     longest = max(row.shape[1] for row in result.rows)

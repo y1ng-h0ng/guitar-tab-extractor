@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import tempfile
+import gc
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -23,11 +24,16 @@ class GuiWorkflowTests(unittest.TestCase):
         self.video.touch()
         self.app = gui.App(self.root)
         self.addCleanup(self.app.source.close)
+        self.addCleanup(self.app.close_review)
 
     def close_root(self):
         for callback in self.root.tk.splitlist(self.root.tk.call('after', 'info')):
             self.root.after_cancel(callback)
         self.root.destroy()
+        # Destroyed Tk roots from earlier tests must be collected on this
+        # thread, before later downloader tests start their worker threads.
+        self.app = None
+        gc.collect()
 
     def drop(self, *paths):
         # Convert to an actual Tcl list string, as Explorer's native drop does.
@@ -98,7 +104,9 @@ class GuiWorkflowTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0], str(self.video))
             self.assertEqual(run.call_args.kwargs['region'], region)
             self.assertEqual(run.call_args.kwargs['source_url'], url)
-            close.assert_called_once()
+            # Active review needs the downloaded source for local reprocessing.
+            close.assert_not_called()
+            self.assertIs(run.call_args.kwargs['review_session'], self.app.review)
         self.app.video.set('https://example.com/another')
         self.assertIsNone(self.app.region)
         self.assertEqual(self.app.output.get(), gui.default_output(self.app.video.get()))
@@ -120,6 +128,33 @@ class GuiWorkflowTests(unittest.TestCase):
                 self.app.start()
             run.assert_not_called()
             close.assert_called_once()
+
+    def test_review_navigates_issue_rows_and_dispatches_only_selected_segment(self):
+        import numpy as np
+        from tabextract.pages import Segment
+        self.app.review.records = [dict(id=1, original=Segment(0, 10, 10),
+            segment=Segment(0, 10, 10), polarity='bright', detail_gain=1.,
+            page=np.full((180, 480), 255, np.uint8), valid=True)]
+        report = dict(pdf_pages=1, score_rows=1, video_pages=1, warnings=[],
+            source_views=[dict(page=1, segment_id=1)], rows=[dict(source_pages=[1])],
+            issues=[dict(segment_id=1, message='测试接缝', time_seconds=.4, bbox=[10, 20, 30, 40])])
+        self.app.review.summary = self.app.summary = report
+        self.app.review.rows = [np.full((100, 500), 255, np.uint8)]
+        self.app.review.config = dict(polarity='bright', video_path=str(self.video))
+        self.app.show_report()
+        win = self.app.review_window
+        win.tree.selection_set('segment-1-0'); win.select()
+        self.assertEqual(win.time.get(), '0.400')
+        self.assertEqual(win.description.get(), '测试接缝')
+        self.assertEqual(win.row.get(), '1')
+        self.assertIsNotNone(win.photo)
+        win.show_row(); self.assertEqual(win.mode.get(), '生成谱行')
+        with patch.object(self.app, 'reprocess_segment') as process:
+            win.gain.set('1.4'); win.apply_btn.invoke()
+            process.assert_called_once_with(1, 0., 1., 'bright', 1.4)
+        self.app.close_review()
+        self.assertFalse(self.app.review.records)
+        self.assertIsNone(self.app.review.summary)
 
 
 if __name__ == '__main__':

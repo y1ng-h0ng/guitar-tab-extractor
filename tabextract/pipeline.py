@@ -8,12 +8,13 @@ import cv2
 import numpy as np
 from .region import detect_tab_region
 from .pages import scan_segments, load_segment_frames
-from .clean import clean_frames
+from .clean import clean_frames, infer_polarity
 from .scroll import make_scroll_bridge
 from .geometry import staff_groups
 from .stitch import assemble_score, stack_rows
 from .pdfout import export_rows
 from .support import check_cancel, parse_bars_per_row, validate_options, write_image
+from .review import build_issues
 
 
 def inspect_video(video_path, region=None, cancel_event=None):
@@ -79,6 +80,8 @@ def run_pipeline(
     generate_report=False,
     cancel_event=None,
     source_url=None,
+    review_session=None,
+    _edit=None,
 ):
     bars_per_row = parse_bars_per_row(bars_per_row)
     validate_options(sample_fps, dpi, bars_per_row)
@@ -103,7 +106,13 @@ def run_pipeline(
 
     progress(2, "[1/5] 定位谱面，保留上方标记与下方符干 ...")
     manual = region is not None
-    region, confidence, preview = inspect_video(source, region, cancel_event)
+    if _edit is None:
+        region, confidence, preview = inspect_video(source, region, cancel_event)
+    else:
+        region = tuple(review_session.summary["region"])
+        confidence = review_session.summary["region_confidence"]
+        manual = review_session.summary["manual_region"]
+        debug = None
     x, y, w, h = region
     progress(8, f"谱面区域: {region}；定位评分 {confidence:.2f}")
     if debug:
@@ -111,42 +120,74 @@ def run_pipeline(
         cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 80, 255), 2)
         write_image(debug / "region_preview.png", annotated)
     progress(10, "[2/5] 按音符特征检测翻页 ...")
-    segments, actual_polarity = scan_segments(
-        source,
-        region,
-        sample_fps,
-        polarity,
-        log,
-        progress=lambda p: progress(10 + 25 * p, "正在扫描视频 ...", False),
-        cancel_event=cancel_event,
-    )
+    if _edit is None:
+        segments, actual_polarity = scan_segments(
+            source,
+            region,
+            sample_fps,
+            polarity,
+            log,
+            progress=lambda p: progress(10 + 25 * p, "正在扫描视频 ...", False),
+            cancel_event=cancel_event,
+        )
+    else:
+        segments = [r["original"] for r in review_session.records]
+        actual_polarity = review_session.summary["polarity"]
+        log("局部重处理：复用其他片段，仅更新所选片段与相邻接缝。")
     pages = []
-    kept_segments = []
+    records = []
+    bridge_cache = dict(review_session.bridges) if _edit else {}
     view_info = []
     skipped = []
     progress(36, "[3/5] 每页多帧合成，去除背景和播放指示线 ...")
     for i, segment in enumerate(segments):
-        frames = load_segment_frames(source, region, segment, cancel_event=cancel_event)
-        page = clean_frames(frames, actual_polarity, cancel_event=cancel_event)
-        if not staff_groups(page):
-            skipped.append({"start": segment.start, "end": segment.end})
+        check_cancel(cancel_event)
+        if _edit is not None and i+1 != _edit["id"]:
+            record = review_session.records[i]
+        else:
+            original = segment
+            selected_polarity = actual_polarity if _edit is None else _edit["polarity"]
+            gain = 1.0 if _edit is None else _edit["detail_gain"]
+            segment = segment if _edit is None else _edit["segment"]
+            frames = load_segment_frames(source, region, segment, cancel_event=cancel_event)
+            effective_polarity = selected_polarity
+            if effective_polarity == "auto":
+                votes = [infer_polarity(frames[j]) for j in (0, len(frames)//2, len(frames)-1)]
+                effective_polarity = max(set(votes), key=votes.count)
+            diagnostics = []
+            page = clean_frames(frames, effective_polarity, cancel_event=cancel_event,
+                                detail_gain=gain, diagnostics=diagnostics)
+            record = {"id": i+1, "original": original, "segment": segment,
+                      "page": page, "raw": frames[len(frames)//2], "samples": len(frames),
+                      "polarity": selected_polarity, "detail_gain": gain,
+                      "effective_polarity": effective_polarity,
+                      "revision": 0 if _edit is None else _edit["revision"],
+                      "diagnostics": diagnostics, "valid": bool(staff_groups(page))}
+            if _edit is not None and not record["valid"]:
+                raise RuntimeError("此局部设置未提取到有效六线谱，原片段和 PDF 已保留；请调整采样时间或颜色模式")
+        records.append(record)
+        segment, page = record["segment"], record["page"]
+        if not record["valid"]:
+            skipped.append({"start": segment.start, "end": segment.end, "segment_id": i+1})
             if debug:
-                write_image(debug / f"skipped_{i + 1:02}_raw.png", frames[len(frames) // 2])
+                write_image(debug / f"skipped_{i + 1:02}_raw.png", record["raw"])
                 write_image(debug / f"skipped_{i + 1:02}_clean.png", page)
             log(f"跳过 {segment.start:.2f}–{segment.end:.2f} 秒：未见有效六线谱")
             continue
         pages.append(page)
-        kept_segments.append(segment)
         info = {
             "page": len(pages),
             "start_seconds": segment.start,
             "end_seconds": segment.end,
-            "samples": len(frames),
+            "samples": record["samples"],
+            "segment_id": record["id"],
+            "detail_gain": record["detail_gain"],
+            "polarity": record["polarity"],
         }
         view_info.append(info)
         if debug:
             write_image(
-                debug / f"page_{len(pages):02}_raw.png", frames[len(frames) // 2]
+                debug / f"page_{len(pages):02}_raw.png", record["raw"]
             )
             write_image(debug / f"page_{len(pages):02}_clean.png", page)
         progress(
@@ -158,12 +199,24 @@ def run_pipeline(
     progress(77, "[4/5] 相邻页去重，保护连音换行并对齐行宽 ...")
 
     def bridge_provider(index, previous, current):
+        kept = [r for r in records if r["valid"]]
+        a, b = kept[index-1], kept[index]
+        key = (a["id"], a["revision"], b["id"], b["revision"])
+        if key in bridge_cache:
+            return bridge_cache[key]
         progress(77 + 11 * index / max(1, len(pages) - 1),
                  f"补采页面 {index} → {index + 1} 的翻页过程 ...")
-        bridge = make_scroll_bridge(
-            source, region, kept_segments[index - 1], kept_segments[index],
-            actual_polarity, sample_fps, cancel_event,
+        # Keep the original transition interval. Reclean only this bridge with
+        # the adjoining views' mean gain, then verify BOTH seams as usual.
+        # Opposite foreground polarities cannot share a single aligned bridge.
+        pa = a.get("effective_polarity", a["polarity"])
+        pb = b.get("effective_polarity", b["polarity"])
+        bridge = None if pa != pb else make_scroll_bridge(
+            source, region, a["original"], b["original"],
+            pa, sample_fps, cancel_event,
+            detail_gain=(a["detail_gain"]+b["detail_gain"])/2,
         )
+        bridge_cache[key] = bridge
         if debug and bridge is not None:
             write_image(debug / f"scroll_{index:02}_clean.png", bridge["page"])
         return bridge
@@ -171,6 +224,7 @@ def run_pipeline(
     log("自动分行：按小节宽度与连线安排每行数量，并统一行宽。" if bars_per_row is None
         else f"自定义分行：每行目标 {bars_per_row} 小节，并统一行宽。")
     result = assemble_score(pages, bars_per_row, log, cancel_event, bridge_provider)
+    issues = build_issues(records, result.joins, result.row_info)
     for item in result.joins:
         if "to_page" in item:
             item["time_seconds"] = view_info[item["to_page"] - 1]["start_seconds"]
@@ -221,6 +275,10 @@ def run_pipeline(
         "output_pdf": str(out),
         "report_path": str(report_path) if report_path else None,
         "warnings": result.warnings,
+        "issues": issues,
+        "segment_settings": [{"segment_id": r["id"], "start_seconds": r["segment"].start,
+                              "end_seconds": r["segment"].end, "polarity": r["polarity"],
+                              "detail_gain": r["detail_gain"], "included": r["valid"]} for r in records],
         "source_views": view_info,
         "skipped_segments": skipped,
         "joins": result.joins,
@@ -233,6 +291,15 @@ def run_pipeline(
     }
     if report_path:
         _save_json(report_path, summary)
+    if review_session is not None:
+        review_session.records = records
+        review_session.bridges = bridge_cache
+        review_session.rows = result.rows
+        review_session.summary = summary
+        if _edit is None:
+            review_session.config = dict(video_path=str(source), out_pdf=str(out),
+                sample_fps=sample_fps, dpi=dpi, region=list(region), bars_per_row=bars_per_row,
+                polarity=actual_polarity, generate_report=generate_report, source_url=source_url)
     progress(
         100,
         f"完成: {len(layouts)} 页 PDF，{len(result.rows)} 行谱表；待核对 {len(result.warnings)} 项",

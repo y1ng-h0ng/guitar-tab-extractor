@@ -210,7 +210,7 @@ def load_scroll_frames(video_path, region, previous_segment, next_segment,
 
 
 def make_scroll_bridge(video_path, region, previous_segment, next_segment,
-                       polarity, sample_fps=6, cancel_event=None):
+                       polarity, sample_fps=6, cancel_event=None, detail_gain=1.0):
     frames, start, end = load_scroll_frames(
         video_path, region, previous_segment, next_segment, sample_fps, cancel_event
     )
@@ -232,7 +232,7 @@ def make_scroll_bridge(video_path, region, previous_segment, next_segment,
     if np.any(coverage < 3):
         return None  # Do not silently erase a gap seen too briefly for consensus.
     page = clean_frames(frames, polarity, cancel_event=cancel_event,
-                        horizontal_offsets=positions - anchor)
+                        horizontal_offsets=positions - anchor, detail_gain=detail_gain)
     upscale = page.shape[1] / frames[0].shape[1]
     return {"page": page, "first_shift": anchor * upscale,
             "background_mask": motion_background_mask(frames, positions, polarity, cancel_event),

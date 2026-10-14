@@ -16,6 +16,8 @@ except ImportError as error:
 from tabextract import run_pipeline
 from tabextract.download import VideoSource, video_url, default_output
 from tabextract.pipeline import inspect_video
+from tabextract.review import ReviewSession
+from tabextract.review_ui import ReviewDialog
 from tabextract.support import CancelledError, open_file, parse_bars_per_row, validate_options
 
 try:
@@ -87,6 +89,7 @@ class App:
         self.events = queue.Queue(); self.worker = None; self.cancel_event = threading.Event(); self.closing = False
         self.region = None; self.region_source = None; self.summary = None; self.preview_path = None
         self.source = VideoSource(); self.previous_input = ""
+        self.review = ReviewSession(); self.review_window = None
         self.video = tk.StringVar(); self.output = tk.StringVar(); self.fps = tk.StringVar(value="6"); self.dpi = tk.StringVar(value="300"); self.bars = tk.StringVar(value="自动")
         self.color = tk.StringVar(value="自动识别"); self.debug = tk.BooleanVar(value=False); self.report = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="拖入视频或粘贴视频分享链接，点击“一键生成”。"); self.region_text = tk.StringVar(value="自动定位谱面")
@@ -138,7 +141,7 @@ class App:
         if self.worker and self.worker.is_alive(): return
         current = self.video.get().strip(); old = self.previous_input
         self.previous_input = current
-        self.source.close(); self.reset_region()
+        self.close_review(); self.source.close(); self.reset_region()
         try:
             old_default = default_output(old)
         except ValueError:
@@ -204,6 +207,8 @@ class App:
     def busy(self, value):
         for b in (self.run_btn, self.preview_btn, self.auto_btn, self.pick_btn, self.video_entry): b.config(state="disabled" if value else "normal")
         self.cancel_btn.config(state="normal" if value else "disabled")
+        if self.review_window and self.review_window.winfo_exists():
+            self.review_window.busy(value)
 
     def launch(self, fn):
         if self.worker and self.worker.is_alive(): return
@@ -211,9 +216,11 @@ class App:
         def task():
             try: fn()
             except CancelledError:
-                self.source.close(); self.events.put(("cancelled", None))
+                if not self.summary: self.review.close(); self.source.close()
+                self.events.put(("cancelled", None))
             except Exception:
-                self.source.close(); self.events.put(("error", traceback.format_exc()))
+                if not self.summary: self.review.close(); self.source.close()
+                self.events.put(("error", traceback.format_exc()))
             finally: self.events.put(("finished", None))
         self.worker = threading.Thread(target=task, daemon=True); self.worker.start()
 
@@ -247,19 +254,38 @@ class App:
             debug = str(Path(out).parent / ("debug_" + Path(out).stem)) if self.debug.get() else None
             generate_report = self.report.get()
         except (ValueError, KeyError) as error: messagebox.showerror("检查设置", str(error)); return
+        self.close_review()
         self.summary = None; self.open_btn.config(state="disabled"); self.report_btn.config(state="disabled"); self.progress["value"] = 0
         self.log_text.config(state="normal"); self.log_text.delete("1.0", "end"); self.log_text.config(state="disabled")
         def task():
             linked = video_url(video)
             try:
                 local = self.resolve_video(video)
-                summary = run_pipeline(local, out, sample_fps=fps, dpi=dpi, bars_per_row=bars, region=region, polarity=polarity, debug_dir=debug, generate_report=generate_report, cancel_event=self.cancel_event, log=lambda msg: self.events.put(("log", msg)), progress_cb=lambda pct, msg: self.events.put(("progress", (20 + pct * .8 if linked else pct, msg))), source_url=linked)
-            finally:
+                summary = run_pipeline(local, out, sample_fps=fps, dpi=dpi, bars_per_row=bars, region=region, polarity=polarity, debug_dir=debug, generate_report=generate_report, cancel_event=self.cancel_event, log=lambda msg: self.events.put(("log", msg)), progress_cb=lambda pct, msg: self.events.put(("progress", (20 + pct * .8 if linked else pct, msg))), source_url=linked, review_session=self.review)
+            except Exception:
+                self.review.close()
                 self.source.close()
+                raise
             self.events.put(("done", summary))
         self.launch(task)
 
     def cancel(self): self.cancel_event.set(); self.cancel_btn.config(state="disabled"); self.status.set("正在取消，请稍候 ...")
+
+    def reprocess_segment(self, segment_id, start, end, polarity, gain):
+        if self.worker and self.worker.is_alive(): return
+        self.status.set(f"正在重处理片段 {segment_id}，其他片段复用原结果 ...")
+        def task():
+            summary = self.review.reprocess(segment_id, start, end, polarity, gain,
+                cancel_event=self.cancel_event, log=lambda msg: self.events.put(("log", msg)),
+                progress_cb=lambda pct, msg: self.events.put(("progress", (pct, msg))))
+            self.events.put(("done", summary))
+        self.launch(task)
+
+    def close_review(self):
+        if self.review_window and self.review_window.winfo_exists():
+            self.review_window.destroy()
+        self.review_window = None
+        self.review.close()
 
     def poll(self):
         try:
@@ -273,15 +299,18 @@ class App:
                 elif kind == "done":
                     self.summary = payload; self.open_btn.config(state="normal"); self.report_btn.config(state="normal")
                     text = f"完成：{payload['pdf_pages']} 页 PDF，{payload['score_rows']} 行谱表。"
-                    if payload["warnings"]: text += f" 有 {len(payload['warnings'])} 项待核对，请点“查看检查结果”。"
+                    count = len(payload.get("issues", [])) or len(payload["warnings"])
+                    if count: text += f" 有 {count} 项待核对，请点“查看检查结果”。"
                     self.status.set(text)
                 elif kind == "cancelled": self.status.set("已取消。")
                 elif kind == "error":
                     self.append_log(payload); self.status.set("提取失败，详见日志。")
                     if not self.closing: messagebox.showerror("处理失败", payload.strip().splitlines()[-1])
                 elif kind == "finished":
+                    self.worker = None
                     self.busy(False)
-                    if self.closing: self.source.close(); self.root.destroy(); return
+                    if self.closing: self.close_review(); self.source.close(); self.root.destroy(); return
+                    if self.review_window and self.review_window.winfo_exists(): self.review_window.refresh()
         except queue.Empty: pass
         self.root.after(80, self.poll)
 
@@ -295,6 +324,13 @@ class App:
 
     def show_report(self):
         if not self.summary: return
+        if self.worker and self.worker.is_alive(): return
+        if self.review.records:
+            if self.review_window and self.review_window.winfo_exists():
+                self.review_window.lift()
+            else:
+                self.review_window = ReviewDialog(self)
+            return
         r = self.summary; win = tk.Toplevel(self.root); win.title("提取检查结果"); win.geometry("740x420")
         box = tk.Text(win, wrap="word", padx=14, pady=14); box.pack(fill="both", expand=True)
         text = f"源页面：{r['video_pages']}\n谱表行数：{r['score_rows']}\nPDF 页数：{r['pdf_pages']}\n"
@@ -313,7 +349,7 @@ class App:
 
     def close(self):
         if self.worker and self.worker.is_alive(): self.closing = True; self.cancel()
-        else: self.source.close(); self.root.destroy()
+        else: self.close_review(); self.source.close(); self.root.destroy()
 
 
 def main():
