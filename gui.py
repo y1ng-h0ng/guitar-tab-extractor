@@ -14,11 +14,13 @@ try:
 except ImportError as error:
     raise SystemExit("缺少图形界面依赖，请安装官方 Python（包含 Tcl/Tk）和 requirements.txt。") from error
 from tabextract import run_pipeline
-from tabextract.download import VideoSource, video_url, default_output
+from tabextract.download import VideoSource, video_url, default_output, probe_video, thumbnail_image
+from tabextract.cache import CacheStore
+from tabextract.source_ui import LinkDialog, CacheDialog, describe
 from tabextract.pipeline import inspect_video
 from tabextract.review import ReviewSession
 from tabextract.review_ui import ReviewDialog
-from tabextract.support import CancelledError, open_file, parse_bars_per_row, validate_options
+from tabextract.support import CancelledError, open_file, parse_bars_per_row, validate_options, time_bounds
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -85,15 +87,19 @@ class RegionDialog(tk.Toplevel):
 
 class App:
     def __init__(self, root):
-        self.root = root; root.title("吉他谱视频提取工具"); root.geometry("860x660"); root.minsize(740, 580)
+        self.root = root; root.title("吉他谱视频提取工具"); root.geometry("920x760"); root.minsize(880, 690)
         self.events = queue.Queue(); self.worker = None; self.cancel_event = threading.Event(); self.closing = False
         self.region = None; self.region_source = None; self.summary = None; self.preview_path = None
-        self.source = VideoSource(); self.previous_input = ""
+        self.cache = CacheStore()
+        self.source = VideoSource(self.cache); self.previous_input = ""
+        self.link_options = {}; self.link_window = None; self.cache_window = None
+        self.link_info = tk.StringVar(value='默认处理整段视频；只改每行小节数或 DPI 时自动复用缓存。')
+        self.range_start = tk.StringVar(); self.range_end = tk.StringVar()
         self.review = ReviewSession(); self.review_window = None
         self.video = tk.StringVar(); self.output = tk.StringVar(); self.fps = tk.StringVar(value="6"); self.dpi = tk.StringVar(value="300"); self.bars = tk.StringVar(value="自动")
         self.color = tk.StringVar(value="自动识别"); self.debug = tk.BooleanVar(value=False); self.report = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="拖入视频或粘贴视频分享链接，点击“一键生成”。"); self.region_text = tk.StringVar(value="自动定位谱面")
-        frame = ttk.Frame(root, padding=18); frame.pack(fill="both", expand=True); frame.columnconfigure(1, weight=1); frame.rowconfigure(8, weight=1)
+        frame = ttk.Frame(root, padding=18); frame.pack(fill="both", expand=True); frame.columnconfigure(1, weight=1); frame.rowconfigure(10, weight=1)
         ttk.Label(frame, text="从演示视频整理吉他谱", font=("Microsoft YaHei UI", 17, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 16))
         ttk.Label(frame, text="视频 / 分享链接").grid(row=1, column=0, sticky="w", padx=(0, 10))
         self.video_entry = ttk.Entry(frame, textvariable=self.video); self.video_entry.grid(row=1, column=1, sticky="ew", pady=5)
@@ -112,16 +118,27 @@ class App:
         extras = ttk.Frame(frame); extras.grid(row=5, column=0, columnspan=3, sticky="w", pady=7)
         ttk.Checkbutton(extras, text="保存过程截图", variable=self.debug).pack(side="left")
         ttk.Checkbutton(extras, text="生成报告文件 (.report.json)", variable=self.report).pack(side="left", padx=(18, 0))
-        actions = ttk.Frame(frame); actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=10)
+        source_opts = ttk.Frame(frame); source_opts.grid(row=6, column=0, columnspan=3, sticky='ew', pady=6)
+        self.link_btn = ttk.Button(source_opts, text='解析链接 / 分 P / 清晰度', command=self.fetch_link_details)
+        self.link_btn.pack(side='left', padx=(0, 12))
+        ttk.Label(source_opts, text='处理时间').pack(side='left')
+        ttk.Entry(source_opts, textvariable=self.range_start, width=10).pack(side='left', padx=5)
+        ttk.Label(source_opts, text='至').pack(side='left')
+        ttk.Entry(source_opts, textvariable=self.range_end, width=10).pack(side='left', padx=5)
+        ttk.Label(source_opts, text='秒 / 时:分:秒（留空为整段）').pack(side='left')
+        self.cache_btn = ttk.Button(source_opts, text='缓存管理', command=self.show_cache)
+        self.cache_btn.pack(side='right')
+        ttk.Label(frame, textvariable=self.link_info, wraplength=850).grid(row=7, column=0, columnspan=3, sticky='w')
+        actions = ttk.Frame(frame); actions.grid(row=8, column=0, columnspan=3, sticky="ew", pady=10)
         self.run_btn = ttk.Button(actions, text="一键生成", command=self.start); self.run_btn.pack(side="left")
         self.cancel_btn = ttk.Button(actions, text="取消", command=self.cancel, state="disabled"); self.cancel_btn.pack(side="left", padx=8)
         self.open_btn = ttk.Button(actions, text="打开 PDF", command=self.open_pdf, state="disabled"); self.open_btn.pack(side="left")
         self.report_btn = ttk.Button(actions, text="查看检查结果", command=self.show_report, state="disabled"); self.report_btn.pack(side="left", padx=8)
-        self.progress = ttk.Progressbar(frame, maximum=100); self.progress.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 10))
-        logs = ttk.Frame(frame); logs.grid(row=8, column=0, columnspan=3, sticky="nsew")
+        self.progress = ttk.Progressbar(frame, maximum=100); self.progress.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        logs = ttk.Frame(frame); logs.grid(row=10, column=0, columnspan=3, sticky="nsew")
         self.log_text = tk.Text(logs, state="disabled", height=13, wrap="word", font=("Consolas", 10)); self.log_text.pack(side="left", fill="both", expand=True)
         scroll = ttk.Scrollbar(logs, command=self.log_text.yview); scroll.pack(side="right", fill="y"); self.log_text.config(yscrollcommand=scroll.set)
-        ttk.Label(frame, textvariable=self.status, wraplength=780).grid(row=9, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.status, wraplength=850).grid(row=11, column=0, columnspan=3, sticky="w", pady=(10, 0))
         self.drop_enabled = False
         try:
             if TkinterDnD is not None:
@@ -142,6 +159,11 @@ class App:
         current = self.video.get().strip(); old = self.previous_input
         self.previous_input = current
         self.close_review(); self.source.close(); self.reset_region()
+        self.link_options = {}
+        self.range_start.set(''); self.range_end.set('')
+        self.link_info.set('默认处理整段视频；只改每行小节数或 DPI 时自动复用缓存。')
+        if self.link_window and self.link_window.winfo_exists():
+            self.link_window.destroy()
         try:
             old_default = default_output(old)
         except ValueError:
@@ -201,14 +223,64 @@ class App:
 
     def resolve_video(self, source):
         return self.source.resolve(source, cancel_event=self.cancel_event,
+            **self.link_options,
             log=lambda msg: self.events.put(("log", msg)),
             progress_cb=lambda pct, msg: self.events.put(("progress", (pct * .2, msg))))
 
     def busy(self, value):
-        for b in (self.run_btn, self.preview_btn, self.auto_btn, self.pick_btn, self.video_entry): b.config(state="disabled" if value else "normal")
+        for b in (self.run_btn, self.preview_btn, self.auto_btn, self.pick_btn, self.video_entry, self.link_btn, self.cache_btn): b.config(state="disabled" if value else "normal")
         self.cancel_btn.config(state="normal" if value else "disabled")
         if self.review_window and self.review_window.winfo_exists():
             self.review_window.busy(value)
+        if self.link_window and self.link_window.winfo_exists():
+            self.link_window.busy(value)
+
+    def fetch_link_details(self, part=None, previous=None):
+        if self.worker and self.worker.is_alive(): return
+        try:
+            url = video_url(self.video.get())
+            if not url: raise ValueError('请先粘贴视频链接')
+        except ValueError as error:
+            messagebox.showerror('链接信息', str(error)); return
+        self.status.set('正在读取视频信息与可用清晰度 ...')
+        def task():
+            info = probe_video(url, part=part, previous=previous, cancel_event=self.cancel_event)
+            preview = thumbnail_image(info.get('thumbnail'), self.cancel_event)
+            self.events.put(('link_details', (info, preview)))
+        self.launch(task)
+
+    def apply_link_options(self, metadata, format_id):
+        options = dict(part=metadata['part'], format_id=format_id)
+        if options != self.link_options:
+            self.close_review(); self.source.close(); self.reset_region()
+            self.summary = None
+            self.open_btn.config(state='disabled'); self.report_btn.config(state='disabled')
+        self.link_options = options
+        self.link_info.set(describe(metadata))
+        self.status.set('链接设置已应用，点击“一键生成”。')
+
+    def show_cache(self):
+        if self.worker and self.worker.is_alive(): return
+        if self.cache_window and self.cache_window.winfo_exists():
+            self.cache_window.refresh(); self.cache_window.lift()
+        else:
+            self.cache_window = CacheDialog(self)
+
+    def restore_request(self, request):
+        self.video.set(request['source'])
+        self.output.set(request['out_pdf'])
+        self.fps.set(str(request['sample_fps'])); self.dpi.set(str(request['dpi']))
+        self.bars.set(str(request['bars_per_row']) if request['bars_per_row'] else '自动')
+        self.color.set(next(key for key, value in COLORS.items() if value == request['polarity']))
+        start, end = request.get('time_range') or (None, None)
+        self.range_start.set('' if start is None else str(start))
+        self.range_end.set('' if end is None else str(end))
+        self.link_options = request.get('source_options') or {}
+        if self.link_options:
+            self.link_info.set(f"已载入：分 P {self.link_options.get('part') or '链接默认'} · 清晰度 {self.link_options.get('format_id') or '自动'}；可重新解析查看详情。")
+        if request.get('region'):
+            self.apply_region(tuple(request['region']), video_url(request['source']) or request['source'])
+        self.status.set('已载入任务，点击“一键生成”续做；已完成阶段会自动复用。')
 
     def launch(self, fn):
         if self.worker and self.worker.is_alive(): return
@@ -225,16 +297,24 @@ class App:
         self.worker = threading.Thread(target=task, daemon=True); self.worker.start()
 
     def preview(self):
-        try: path = self.valid_video()
+        try:
+            path = self.valid_video()
+            time_range = self.selected_range()
         except ValueError as error: messagebox.showerror("视频文件", str(error)); return
         self.status.set("正在读取预览并定位谱面 ..."); self.preview_path = path; selected = self.region if self.region_source == path else None
         def task():
             local = self.resolve_video(path)
-            try: region, _, frame = inspect_video(local, selected, self.cancel_event)
+            try: region, _, frame = inspect_video(local, selected, self.cancel_event, time_range=time_range)
             except ValueError:
                 cap = cv2.VideoCapture(local)
                 try:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // 5)); ok, frame = cap.read()
+                    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    position = max(0, total // 5)
+                    if time_range is not None:
+                        fps = cap.get(cv2.CAP_PROP_FPS)
+                        start, end = time_bounds(time_range, total/fps if fps > 0 else 0)
+                        position = min(total-1, round((start+(end-start)*.2)*fps))
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, position); ok, frame = cap.read()
                     if not ok: raise OSError("无法读取预览")
                 finally: cap.release()
                 region = None
@@ -243,6 +323,11 @@ class App:
 
     def apply_region(self, region, path):
         self.region = region; self.region_source = path; self.region_text.set("已框选：" + str(region)); self.status.set("谱面范围已设置，点击“一键生成”即可。")
+
+    def selected_range(self):
+        if not self.range_start.get().strip() and not self.range_end.get().strip():
+            return None
+        return time_bounds((self.range_start.get(), self.range_end.get()))
 
     def start(self):
         if self.worker and self.worker.is_alive(): return
@@ -253,6 +338,8 @@ class App:
             region = self.region if self.region_source == video else None; polarity = COLORS[self.color.get()]
             debug = str(Path(out).parent / ("debug_" + Path(out).stem)) if self.debug.get() else None
             generate_report = self.report.get()
+            time_range = self.selected_range()
+            source_options = dict(self.link_options)
         except (ValueError, KeyError) as error: messagebox.showerror("检查设置", str(error)); return
         self.close_review()
         self.summary = None; self.open_btn.config(state="disabled"); self.report_btn.config(state="disabled"); self.progress["value"] = 0
@@ -260,8 +347,9 @@ class App:
         def task():
             linked = video_url(video)
             try:
+                self.cache.prune()
                 local = self.resolve_video(video)
-                summary = run_pipeline(local, out, sample_fps=fps, dpi=dpi, bars_per_row=bars, region=region, polarity=polarity, debug_dir=debug, generate_report=generate_report, cancel_event=self.cancel_event, log=lambda msg: self.events.put(("log", msg)), progress_cb=lambda pct, msg: self.events.put(("progress", (20 + pct * .8 if linked else pct, msg))), source_url=linked, review_session=self.review)
+                summary = run_pipeline(local, out, sample_fps=fps, dpi=dpi, bars_per_row=bars, region=region, polarity=polarity, debug_dir=debug, generate_report=generate_report, cancel_event=self.cancel_event, log=lambda msg: self.events.put(("log", msg)), progress_cb=lambda pct, msg: self.events.put(("progress", (20 + pct * .8 if linked else pct, msg))), source_url=linked, review_session=self.review, time_range=time_range, cache_store=self.cache, source_options=source_options)
             except Exception:
                 self.review.close()
                 self.source.close()
@@ -296,13 +384,21 @@ class App:
                 elif kind == "preview":
                     frame, region, path = payload
                     if not self.closing: RegionDialog(self.root, frame, region, lambda value: self.apply_region(value, path))
+                elif kind == 'link_details':
+                    info, preview = payload
+                    if not self.closing:
+                        if self.link_window and self.link_window.winfo_exists():
+                            self.link_window.update_details(info, preview)
+                        else:
+                            self.link_window = LinkDialog(self, info, preview)
+                        self.status.set('链接信息已读取，请选择分 P 和清晰度。')
                 elif kind == "done":
                     self.summary = payload; self.open_btn.config(state="normal"); self.report_btn.config(state="normal")
                     text = f"完成：{payload['pdf_pages']} 页 PDF，{payload['score_rows']} 行谱表。"
                     count = len(payload.get("issues", [])) or len(payload["warnings"])
                     if count: text += f" 有 {count} 项待核对，请点“查看检查结果”。"
                     self.status.set(text)
-                elif kind == "cancelled": self.status.set("已取消。")
+                elif kind == "cancelled": self.status.set("已取消。已完成阶段已缓存，再次点击“一键生成”可续做。")
                 elif kind == "error":
                     self.append_log(payload); self.status.set("提取失败，详见日志。")
                     if not self.closing: messagebox.showerror("处理失败", payload.strip().splitlines()[-1])

@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 from .clean import infer_polarity, observed_staff, stroke_response
 from .geometry import staff_groups
-from .support import check_cancel
+from .support import check_cancel, time_bounds
 
 
 @dataclass
@@ -65,6 +65,8 @@ def scan_segments(
     log=print,
     progress=None,
     cancel_event=None,
+    time_range=None,
+    checkpoint=None,
 ):
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -74,13 +76,21 @@ def scan_segments(
         if not np.isfinite(fps) or fps <= 0:
             raise ValueError("视频帧率无效，无法可靠地定位翻页")
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        start, end = time_bounds(time_range, total / fps)
+        first, stop = int(np.ceil(start * fps)), min(total, int(np.ceil(end * fps)))
         step = max(1, round(fps / sample_fps))
         auto_mode = polarity == "auto"
         groups = []
         times, differences = [], []
         previous = None
-        idx = 0
-        while cap.grab():
+        idx = first
+        state = checkpoint.load('scan-progress') if checkpoint else None
+        if state is not None:
+            idx, groups, times, differences, previous, polarity = state
+            log(f'从 {idx/fps:.2f} 秒继续翻页扫描。')
+        if idx:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        while idx < stop and cap.grab():
             check_cancel(cancel_event)
             if idx % step == 0:
                 ok, frame = cap.retrieve()
@@ -113,8 +123,10 @@ def scan_segments(
                 previous = feature, norm
                 times.append(idx)
                 if progress and len(times) % max(1, round(sample_fps)) == 0:
-                    progress(min(idx / max(total, 1), 0.99))
+                    progress(min((idx-first) / max(stop-first, 1), 0.99))
             idx += 1
+            if checkpoint and idx % max(1, round(fps * 5)) == 0:
+                checkpoint.save('scan-progress', (idx, groups, times, differences, previous, polarity))
         if not groups:
             raise RuntimeError("视频中未检测到可见六线谱，请检查框选区域与颜色模式")
         if len(times) < 2:

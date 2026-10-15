@@ -9,10 +9,11 @@ from pathlib import Path
 
 from .pages import Segment
 from .support import check_cancel
+from .cache import digest
 
 
 class ReviewSession:
-    """Caches images only for the active GUI result; no persistent project files."""
+    """Active review, with optional persistent checkpoints after successful edits."""
 
     def __init__(self):
         self.records = []
@@ -20,6 +21,9 @@ class ReviewSession:
         self.config = {}
         self.summary = None
         self.rows = []
+        self.cache_store = None
+        self.cache_identity = None
+        self.assembly = {}
 
     def close(self):
         self.records.clear()
@@ -27,6 +31,8 @@ class ReviewSession:
         self.config.clear()
         self.rows.clear()
         self.summary = None
+        self.cache_store = self.cache_identity = None
+        self.assembly = {}
 
     def reprocess(self, segment_id, start, end, polarity, detail_gain,
                   log=print, progress_cb=None, cancel_event=None):
@@ -90,6 +96,17 @@ class ReviewSession:
                 raise
         self.records, self.bridges = candidate.records, candidate.bridges
         self.rows, self.summary = candidate.rows, summary
+        self.assembly = candidate.assembly
+        if self.cache_store and self.cache_identity:
+            try:
+                with self.cache_store.job(self.cache_identity) as checkpoint:
+                    checkpoint.save('overrides', {r['id']: r for r in self.records if r['revision']})
+                    for key, bridge in self.bridges.items():
+                        checkpoint.save('bridge-' + digest(key), {'value': bridge})
+                    checkpoint.save('assembly-' + digest([(r['id'], r['revision']) for r in self.records]),
+                                    self.assembly)
+            except (OSError, RuntimeError, ValueError) as error:
+                log(f'PDF 已更新，但局部修正缓存保存失败：{error}。本次会话仍保留修正。')
         return summary
 
 

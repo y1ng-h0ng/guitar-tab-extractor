@@ -15,11 +15,45 @@ import cv2
 import numpy as np
 
 import main
-from tabextract.download import VideoSource, default_output, safe_title, video_url
+from tabextract.download import VideoSource, default_output, safe_title, video_url, probe_video, download_error, _selection
+from tabextract.cache import CacheStore
 from tabextract.support import CancelledError
 
 
 class LinkInputTests(unittest.TestCase):
+    def test_bilibili_watchlater_and_part_override(self):
+        url = video_url('https://www.bilibili.com/list/watchlater?oid=1&bvid=BV1LA411S7Zh')
+        self.assertIn('/video/BV1LA411S7Zh', url)
+        selected, flags = _selection(url, 3)
+        self.assertIn('p=3', selected)
+        self.assertIn('--no-playlist', flags)
+        self.assertEqual(_selection('https://example.com/list', 2)[1], ['--yes-playlist', '--playlist-items', '2'])
+
+    def test_probe_lists_parts_and_only_selected_formats(self):
+        listing = {'entries': [{'title': 'first'}, {'title': 'second'}]}
+        detail = {'title': 'second', 'duration': 12, 'width': 1280, 'height': 720,
+                  'formats': [{'format_id': 'audio', 'vcodec': 'none'},
+                              {'format_id': '720', 'width': 1280, 'height': 720, 'vcodec': 'avc1'}]}
+        url = 'https://www.bilibili.com/video/BV123/?p=2'
+        with patch('tabextract.download._probe_json', side_effect=[listing, detail]) as probe:
+            info = probe_video(url)
+            self.assertEqual(info['part'], 2)
+            self.assertEqual([f['id'] for f in info['formats']], ['720'])
+            self.assertIn('p=2', probe.call_args.args[0])
+            self.assertNotIn('p=2', probe.call_args_list[0].args[0])
+        with patch('tabextract.download._probe_json', return_value=detail) as probe:
+            probe_video(url, part=1, previous=info)
+            self.assertEqual(probe.call_count, 1)
+            self.assertIn('p=1', probe.call_args.args[0])
+        with self.assertRaises(ValueError): probe_video(url, part=3, previous=info)
+
+    def test_errors_distinguish_access_network_and_platform(self):
+        for detail, kind in [('Sign in required', 'login'), ('HTTP Error 404', 'unavailable'),
+                             ('Connection timed out', 'network'), ('Unsupported URL', 'unsupported'),
+                             ('HTTP Error 403 Forbidden', 'platform'), ('requested format unavailable', 'quality')]:
+            self.assertEqual(download_error(detail).kind, kind)
+        self.assertNotIn('secret', str(download_error('HTTP 404 https://example.com/?secret=123')))
+
     def test_share_text_signed_urls_and_local_paths(self):
         url = 'https://example.com/watch?v=abc&token=x%2Fy'
         self.assertEqual(video_url('分享这首吉他曲 “' + url + '”，复制后打开'), url)
@@ -121,6 +155,30 @@ class LocalHttpDownloadTests(unittest.TestCase):
         source.close()
         self.assertFalse(owned.exists())
         self.assertTrue((self.folder / 'score.mp4').exists())
+
+    def test_persistent_download_survives_restart_and_cleanup_skips_live_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = CacheStore(directory)
+            source = VideoSource(cache)
+            try:
+                path = Path(source.resolve(self.base+'/score.mp4', log=lambda _: None))
+                self.assertEqual(cache.prune(clear=True), 0)
+                source.close()
+                self.assertTrue(path.exists())
+                restarted = VideoSource(cache)
+                try:
+                    with patch('tabextract.download.download_video', side_effect=AssertionError('must reuse download')):
+                        self.assertEqual(restarted.resolve(self.base+'/score.mp4', log=lambda _: None), str(path))
+                finally: restarted.close()
+                self.assertGreater(cache.prune(clear=True), 0)
+                self.assertFalse(path.exists())
+                self.assertTrue((self.folder/'score.mp4').exists())
+            finally: source.close()
+
+    def test_probe_real_http_video_without_downloading(self):
+        info = probe_video(self.base+'/watch.html')
+        self.assertTrue(info['title'])
+        self.assertEqual(info['part'], 1)
 
     def test_invalid_video_is_rejected_and_temporary_directory_removed(self):
         source = VideoSource(); self.addCleanup(source.close)

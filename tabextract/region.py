@@ -10,9 +10,10 @@
 import cv2
 import numpy as np
 from .geometry import staff_from_strength
+from .support import time_bounds
 
 
-def sample_frames(video_path, count=24):
+def sample_frames(video_path, count=24, time_range=None):
     """从视频中均匀采样若干帧。"""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -35,7 +36,16 @@ def sample_frames(video_path, count=24):
                     frames[slot] = frame
         cap.release()
         return frames
-    idxs = np.linspace(0, total - 1, min(count, total)).astype(int)
+    first, stop = 0, total
+    if time_range is not None:
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            start, end = time_bounds(time_range, total / fps)
+            first, stop = int(np.ceil(start*fps)), min(total, int(np.ceil(end*fps)))
+        except Exception:
+            cap.release()
+            raise
+    idxs = np.linspace(first, stop - 1, min(count, stop-first)).astype(int)
     frames = []
     for idx in idxs:
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
@@ -107,8 +117,8 @@ def _detect_from_masks(masks, H, W, search_top_ratio, pad):
     return x0, y0, x1 - x0, y1 - y0, confidence
 
 
-def detect_tab_region(video_path, search_top_ratio=0.35, sample_count=24, pad=8):
-    frames = sample_frames(video_path, sample_count)
+def detect_tab_region(video_path, search_top_ratio=0.35, sample_count=24, pad=8, time_range=None):
+    frames = sample_frames(video_path, sample_count, time_range)
     if not frames:
         raise RuntimeError("视频中没有可读取的帧")
     H, W = frames[0].shape[:2]

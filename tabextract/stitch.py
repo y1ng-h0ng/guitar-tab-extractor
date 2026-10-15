@@ -4,6 +4,7 @@ song is never a reason to delete a measure. No low-ink fallback cuts a measure.
 """
 
 from dataclasses import dataclass, field
+import copy
 import cv2
 import numpy as np
 from .geometry import staff_groups, bar_lines, trim_vertical
@@ -25,6 +26,7 @@ class Assembly:
     runs: list = field(default_factory=list)
     run_sources: list = field(default_factory=list)
     crossing_marks: list = field(default_factory=list)
+    stitch_state: dict = field(default_factory=dict)
 
 
 def _feature(page, lines):
@@ -351,15 +353,23 @@ def _measure_units(image, result, run_index):
 
 
 def assemble_score(pages, bars_per_row=None, log=print, cancel_event=None,
-                   bridge_provider=None):
+                   bridge_provider=None, preassembled=None, save_assembly=None):
     if not pages:
         raise ValueError("没有可拼接的谱面")
     bars_per_row = parse_bars_per_row(bars_per_row)
-    result = Assembly()
-    if all(len(staff_groups(p)) == 1 for p in pages):
+    result = Assembly(**copy.deepcopy(preassembled)) if preassembled else Assembly()
+    if preassembled:
+        log('复用已完成的拼接结果，仅重新排版。')
+    elif all(len(staff_groups(p)) == 1 for p in pages):
         _horizontal_runs(pages, result, log, cancel_event, bridge_provider)
     else:
         _vertical_runs(pages, result, log)
+    # Layout reads runs, but appends warnings and annotates joins. Snapshot the
+    # mutable metadata now so future reflows do not accumulate layout warnings.
+    result.stitch_state = dict(runs=result.runs, run_sources=result.run_sources,
+        joins=copy.deepcopy(result.joins), warnings=list(result.warnings), staff_spacing=result.staff_spacing)
+    if save_assembly and not preassembled:
+        save_assembly(result.stitch_state)
     plans = []
     for run_index, run in enumerate(result.runs):
         check_cancel(cancel_event)

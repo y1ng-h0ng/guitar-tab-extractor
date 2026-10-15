@@ -13,11 +13,12 @@ from .scroll import make_scroll_bridge
 from .geometry import staff_groups
 from .stitch import assemble_score, stack_rows
 from .pdfout import export_rows
-from .support import check_cancel, parse_bars_per_row, validate_options, write_image
+from .support import check_cancel, parse_bars_per_row, validate_options, write_image, time_bounds
 from .review import build_issues
+from .cache import fingerprint, digest
 
 
-def inspect_video(video_path, region=None, cancel_event=None):
+def inspect_video(video_path, region=None, cancel_event=None, time_range=None):
     if not Path(video_path).is_file():
         raise FileNotFoundError(f"找不到视频文件: {video_path}")
     check_cancel(cancel_event)
@@ -30,14 +31,19 @@ def inspect_video(video_path, region=None, cancel_event=None):
             int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
         )
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total // 5))
+        position = max(0, total // 5)
+        if time_range is not None:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            start, end = time_bounds(time_range, total / fps if fps > 0 else 0)
+            position = min(total-1, round((start+(end-start)*.2)*fps))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, position)
         ok, preview = cap.read()
         if not ok:
             raise OSError("无法读取视频预览")
     finally:
         cap.release()
     if region is None:
-        x, y, w, h, confidence = detect_tab_region(str(video_path))
+        x, y, w, h, confidence = detect_tab_region(str(video_path), time_range=time_range)
         if confidence <= 0:
             raise ValueError("无法自动定位六线谱，请使用“预览 / 框选谱面”手动框选")
         region = (x, y, w, h)
@@ -67,6 +73,34 @@ def _save_json(path, value):
 
 
 def run_pipeline(
+    video_path, out_pdf, sample_fps=6.0, dpi=300, debug_dir=None, log=print,
+    progress_cb=None, region=None, bars_per_row=None, polarity='auto',
+    generate_report=False, cancel_event=None, source_url=None, review_session=None,
+    _edit=None, time_range=None, cache_store=None, source_options=None,
+):
+    options = dict(locals())
+    options.pop('cache_store')
+    time_range = time_bounds(time_range) if time_range is not None else None
+    options['time_range'] = time_range
+    if cache_store is None or _edit is not None:
+        return _run_pipeline(**options)
+    validate_options(sample_fps, dpi, parse_bars_per_row(bars_per_row))
+    log('正在检查可恢复的缓存 ...')
+    identity = dict(kind='extraction', version=1, source=fingerprint(video_path, cancel_event),
+                    region=region, sample_fps=sample_fps, polarity=polarity, time_range=time_range)
+    with cache_store.job(identity) as checkpoint:
+        checkpoint.save('request', dict(source=source_url or str(Path(video_path).resolve()),
+            out_pdf=str(Path(out_pdf).resolve()), sample_fps=sample_fps, dpi=dpi,
+            region=region, bars_per_row=bars_per_row, polarity=polarity, time_range=time_range,
+            source_options=source_options))
+        summary = _run_pipeline(**options, _checkpoint=checkpoint)
+        if review_session is not None:
+            review_session.cache_store = cache_store
+            review_session.cache_identity = identity
+        return summary
+
+
+def _run_pipeline(
     video_path,
     out_pdf,
     sample_fps=6.0,
@@ -82,6 +116,9 @@ def run_pipeline(
     source_url=None,
     review_session=None,
     _edit=None,
+    time_range=None,
+    _checkpoint=None,
+    source_options=None,
 ):
     bars_per_row = parse_bars_per_row(bars_per_row)
     validate_options(sample_fps, dpi, bars_per_row)
@@ -107,7 +144,14 @@ def run_pipeline(
     progress(2, "[1/5] 定位谱面，保留上方标记与下方符干 ...")
     manual = region is not None
     if _edit is None:
-        region, confidence, preview = inspect_video(source, region, cancel_event)
+        located = _checkpoint.load('location') if _checkpoint else None
+        if located is None:
+            located = inspect_video(source, region, cancel_event, time_range=time_range)
+            if _checkpoint:
+                _checkpoint.save('location', located)
+        else:
+            log('复用已保存的谱面定位。')
+        region, confidence, preview = located
     else:
         region = tuple(review_session.summary["region"])
         confidence = review_session.summary["region_confidence"]
@@ -121,15 +165,16 @@ def run_pipeline(
         write_image(debug / "region_preview.png", annotated)
     progress(10, "[2/5] 按音符特征检测翻页 ...")
     if _edit is None:
-        segments, actual_polarity = scan_segments(
-            source,
-            region,
-            sample_fps,
-            polarity,
-            log,
-            progress=lambda p: progress(10 + 25 * p, "正在扫描视频 ...", False),
-            cancel_event=cancel_event,
-        )
+        scanned = _checkpoint.load('scan') if _checkpoint else None
+        if scanned is None:
+            scanned = scan_segments(source, region, sample_fps, polarity, log,
+                progress=lambda p: progress(10 + 25 * p, '正在扫描视频 ...', False),
+                cancel_event=cancel_event, time_range=time_range, checkpoint=_checkpoint)
+            if _checkpoint:
+                _checkpoint.save('scan', scanned)
+        else:
+            log('复用已完成的翻页扫描。')
+        segments, actual_polarity = scanned
     else:
         segments = [r["original"] for r in review_session.records]
         actual_polarity = review_session.summary["polarity"]
@@ -139,11 +184,16 @@ def run_pipeline(
     bridge_cache = dict(review_session.bridges) if _edit else {}
     view_info = []
     skipped = []
+    overrides = _checkpoint.load('overrides', {}) if _checkpoint else {}
     progress(36, "[3/5] 每页多帧合成，去除背景和播放指示线 ...")
     for i, segment in enumerate(segments):
         check_cancel(cancel_event)
+        cached_record = (overrides.get(i+1) or _checkpoint.load(f'record-{i+1}')) if _checkpoint else None
         if _edit is not None and i+1 != _edit["id"]:
             record = review_session.records[i]
+        elif cached_record is not None:
+            record = cached_record
+            log(f'复用片段 {i+1} 的提取结果。')
         else:
             original = segment
             selected_polarity = actual_polarity if _edit is None else _edit["polarity"]
@@ -165,6 +215,8 @@ def run_pipeline(
                       "diagnostics": diagnostics, "valid": bool(staff_groups(page))}
             if _edit is not None and not record["valid"]:
                 raise RuntimeError("此局部设置未提取到有效六线谱，原片段和 PDF 已保留；请调整采样时间或颜色模式")
+            if _checkpoint:
+                _checkpoint.save(f'record-{i+1}', record)
         records.append(record)
         segment, page = record["segment"], record["page"]
         if not record["valid"]:
@@ -202,6 +254,10 @@ def run_pipeline(
         kept = [r for r in records if r["valid"]]
         a, b = kept[index-1], kept[index]
         key = (a["id"], a["revision"], b["id"], b["revision"])
+        cache_name = 'bridge-' + digest(key)
+        saved = _checkpoint.load(cache_name) if _checkpoint else None
+        if saved is not None:
+            bridge_cache[key] = saved['value']
         if key in bridge_cache:
             return bridge_cache[key]
         progress(77 + 11 * index / max(1, len(pages) - 1),
@@ -217,13 +273,18 @@ def run_pipeline(
             detail_gain=(a["detail_gain"]+b["detail_gain"])/2,
         )
         bridge_cache[key] = bridge
+        if _checkpoint:
+            _checkpoint.save(cache_name, {'value': bridge})
         if debug and bridge is not None:
             write_image(debug / f"scroll_{index:02}_clean.png", bridge["page"])
         return bridge
 
     log("自动分行：按小节宽度与连线安排每行数量，并统一行宽。" if bars_per_row is None
         else f"自定义分行：每行目标 {bars_per_row} 小节，并统一行宽。")
-    result = assemble_score(pages, bars_per_row, log, cancel_event, bridge_provider)
+    assembly_key = 'assembly-' + digest([(r['id'], r['revision']) for r in records])
+    result = assemble_score(pages, bars_per_row, log, cancel_event, bridge_provider,
+        preassembled=_checkpoint.load(assembly_key) if _checkpoint else None,
+        save_assembly=(lambda value: _checkpoint.save(assembly_key, value)) if _checkpoint else None)
     issues = build_issues(records, result.joins, result.row_info)
     for item in result.joins:
         if "to_page" in item:
@@ -258,6 +319,7 @@ def run_pipeline(
     summary = {
         "source_video": source.name,
         "source_url": source_url,
+        "time_range": time_range,
         "region": list(region),
         "region_confidence": confidence,
         "manual_region": manual,
@@ -292,14 +354,23 @@ def run_pipeline(
     if report_path:
         _save_json(report_path, summary)
     if review_session is not None:
+        if _checkpoint:
+            kept = [r for r in records if r['valid']]
+            for a, b in zip(kept, kept[1:]):
+                key = (a['id'], a['revision'], b['id'], b['revision'])
+                saved = _checkpoint.load('bridge-' + digest(key))
+                if saved is not None:
+                    bridge_cache[key] = saved['value']
         review_session.records = records
         review_session.bridges = bridge_cache
         review_session.rows = result.rows
+        review_session.assembly = result.stitch_state
         review_session.summary = summary
         if _edit is None:
             review_session.config = dict(video_path=str(source), out_pdf=str(out),
                 sample_fps=sample_fps, dpi=dpi, region=list(region), bars_per_row=bars_per_row,
-                polarity=actual_polarity, generate_report=generate_report, source_url=source_url)
+                polarity=actual_polarity, generate_report=generate_report, source_url=source_url,
+                time_range=time_range)
     progress(
         100,
         f"完成: {len(layouts)} 页 PDF，{len(result.rows)} 行谱表；待核对 {len(result.warnings)} 项",

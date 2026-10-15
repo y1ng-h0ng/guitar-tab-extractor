@@ -27,6 +27,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.addCleanup(self.app.close_review)
 
     def close_root(self):
+        self.root.update_idletasks()
         for callback in self.root.tk.splitlist(self.root.tk.call('after', 'info')):
             self.root.after_cancel(callback)
         self.root.destroy()
@@ -118,6 +119,44 @@ class GuiWorkflowTests(unittest.TestCase):
         self.app.output.set('自定义.pdf')
         self.app.video.set('https://example.com/new')
         self.assertEqual(self.app.output.get(), '自定义.pdf')
+
+    def test_link_selection_range_and_restore_reach_pipeline(self):
+        url = 'https://example.com/list'
+        self.app.video.set(url)
+        metadata = dict(title='第二段', duration=30., width=1280, height=720,
+                        part=2, parts=[{'index': 1}, {'index': 2}])
+        self.app.apply_link_options(metadata, '720')
+        self.app.range_start.set('0:05'); self.app.range_end.set('15')
+        with patch.object(self.app, 'launch', side_effect=lambda fn: fn()), \
+                patch.object(self.app.source, 'resolve', return_value=str(self.video)) as resolve, \
+                patch('gui.run_pipeline') as run:
+            self.app.start()
+            self.assertEqual(resolve.call_args.kwargs['part'], 2)
+            self.assertEqual(resolve.call_args.kwargs['format_id'], '720')
+            self.assertEqual(run.call_args.kwargs['time_range'], (5, 15))
+            self.assertIs(run.call_args.kwargs['cache_store'], self.app.cache)
+        request = dict(source=url, out_pdf='恢复.pdf', sample_fps=3, dpi=150,
+                       bars_per_row=5, region=[0, 0, 300, 100], polarity='bright',
+                       time_range=[5, 15], source_options={'part': 2, 'format_id': '720'})
+        self.app.restore_request(request)
+        self.assertEqual(self.app.bars.get(), '5')
+        self.assertEqual(self.app.selected_range(), (5, 15))
+        self.assertEqual(self.app.link_options['part'], 2)
+        self.assertEqual(self.app.region_source, url)
+
+    def test_link_dialog_failed_part_fetch_does_not_mix_old_formats(self):
+        from tabextract.source_ui import LinkDialog
+        info = dict(title='分 P 1', duration=30., width=1280, height=720, part=1,
+            parts=[{'index': 1, 'title': 'first'}, {'index': 2, 'title': 'second'}],
+            formats=[{'id': '720', 'label': '720p'}])
+        win = LinkDialog(self.app, info, None)
+        self.addCleanup(win.destroy)
+        win.part.current(1)
+        win.busy(True); win.busy(False)
+        self.assertEqual(win.part.current(), 0)
+        self.root.update_idletasks()
+        self.assertLessEqual(win.apply_btn.winfo_rooty() + win.apply_btn.winfo_height(),
+                             win.winfo_rooty() + win.winfo_height())
 
     def test_failed_download_never_calls_pipeline_and_releases_cache(self):
         self.app.video.set('https://example.com/video')
