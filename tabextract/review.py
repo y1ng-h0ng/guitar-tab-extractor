@@ -9,7 +9,9 @@ from pathlib import Path
 
 from .pages import Segment
 from .support import check_cancel
-from .cache import digest
+from .cache import digest, assembly_name
+from .regions import validate_region, apply_regions
+from .geometry import staff_groups
 
 
 class ReviewSession:
@@ -36,8 +38,6 @@ class ReviewSession:
 
     def reprocess(self, segment_id, start, end, polarity, detail_gain,
                   log=print, progress_cb=None, cancel_event=None):
-        from .pipeline import run_pipeline, _save_json
-
         if not self.summary:
             raise ValueError("请先生成谱面")
         record = next((r for r in self.records if r["id"] == segment_id), None)
@@ -56,10 +56,44 @@ class ReviewSession:
             raise ValueError("采样范围过短")
         edit = {"id": segment_id, "segment": segment, "polarity": polarity,
                 "detail_gain": float(detail_gain), "revision": record["revision"]+1}
+        return self._publish(edit, log, progress_cb, cancel_event)
+
+    def edit_regions(self, segment_id, kind=None, bbox=None, undo=False,
+                     log=print, progress_cb=None, cancel_event=None):
+        if not self.summary:
+            raise ValueError('请先生成谱面')
+        original = next((r for r in self.records if r['id'] == segment_id), None)
+        if original is None:
+            raise ValueError('片段不存在')
+        operations = list(original.get('regions', []))
+        if undo:
+            if not operations: raise ValueError('此片段没有可撤销的框选')
+            operations.pop()
+        else:
+            if len(operations) >= 100:
+                raise ValueError('每个片段最多保存 100 个框选，请先撤销不需要的框选')
+            operations.append(validate_region(kind, bbox, original['page'].shape))
+        record = dict(original, regions=operations, revision=original['revision']+1)
+        record['base_page'] = original.get('base_page', original['page'])
+        record['page'] = apply_regions(record['base_page'], [(record, 0, 0)])
+        if not staff_groups(record['page']):
+            raise ValueError('此框选会破坏六线谱结构，请缩小范围；原结果已保留')
+        edit = {'id': segment_id, 'revision': record['revision'], 'replacement': record}
+        return self._publish(edit, log, progress_cb, cancel_event)
+
+    def _publish(self, edit, log, progress_cb, cancel_event):
+        from .pipeline import run_pipeline, _save_json
+        segment_id = edit['id']
         candidate = copy.copy(self)
         candidate.records = list(self.records)
-        candidate.bridges = {key: value for key, value in self.bridges.items()
-                             if segment_id not in (key[0], key[2])}
+        if 'replacement' in edit:
+            # Drawing changes no source evidence or geometry; reuse transitions.
+            candidate.bridges = {(a, edit['revision'] if a == segment_id else ar,
+                                  b, edit['revision'] if b == segment_id else br): value
+                                 for (a, ar, b, br), value in self.bridges.items()}
+        else:
+            candidate.bridges = {key: value for key, value in self.bridges.items()
+                                 if segment_id not in (key[0], key[2])}
         config = dict(self.config)
         out = Path(config.pop("out_pdf"))
         report = bool(config.get("generate_report"))
@@ -103,7 +137,7 @@ class ReviewSession:
                     checkpoint.save('overrides', {r['id']: r for r in self.records if r['revision']})
                     for key, bridge in self.bridges.items():
                         checkpoint.save('bridge-' + digest(key), {'value': bridge})
-                    checkpoint.save('assembly-' + digest([(r['id'], r['revision']) for r in self.records]),
+                    checkpoint.save(assembly_name(self.records),
                                     self.assembly)
             except (OSError, RuntimeError, ValueError) as error:
                 log(f'PDF 已更新，但局部修正缓存保存失败：{error}。本次会话仍保留修正。')

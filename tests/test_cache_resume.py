@@ -116,6 +116,22 @@ class CacheTests(unittest.TestCase):
         self.run_score(sample_fps=3)
         self.assertEqual(load.call_count, 3)
 
+    def test_old_cache_upgrade_preserves_manual_segment_settings(self):
+        self.patch_pipeline()
+        session = ReviewSession()
+        self.run_score(review_session=session)
+        session.reprocess(2, 2.1, 2.9, 'bright', 1.3, log=lambda _:None)
+        with self.cache.job(session.cache_identity) as checkpoint:
+            overrides = checkpoint.load('overrides')
+            for key in ('base_page','evidence_page','regions'):
+                overrides[2].pop(key,None)
+            checkpoint.save('overrides',overrides)
+        restarted = ReviewSession()
+        self.run_score(review_session=restarted)
+        self.assertEqual(restarted.records[1]['detail_gain'],1.3)
+        self.assertEqual(restarted.records[1]['segment'].first,21)
+        self.assertIn('base_page',restarted.records[1])
+
     def test_partial_scan_restores_features_and_absolute_times(self):
         frames = [frame()] * 180
         cancel = threading.Event()

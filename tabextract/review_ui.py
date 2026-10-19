@@ -24,6 +24,8 @@ class ReviewDialog(tk.Toplevel):
         self.time = tk.StringVar(); self.row = tk.StringVar()
         self.description = tk.StringVar(); self.bounds = tk.StringVar()
         self.overview = tk.StringVar()
+        self.drawing = tk.StringVar(value='浏览')
+        self.drag = None; self.image_scale = 1.
         ttk.Label(self, textvariable=self.overview, padding=10, wraplength=1100).pack(fill="x")
         body = ttk.Panedwindow(self, orient="horizontal"); body.pack(fill="both", expand=True, padx=10)
         left = ttk.Frame(body); right = ttk.Frame(body); body.add(left, weight=1); body.add(right, weight=4)
@@ -54,6 +56,9 @@ class ReviewDialog(tk.Toplevel):
         sx.grid(row=1, column=0, sticky="ew"); sy.grid(row=0, column=1, sticky="ns")
         self.canvas.config(xscrollcommand=sx.set, yscrollcommand=sy.set)
         self.canvas.bind("<Configure>", lambda _: self.render())
+        self.canvas.bind('<ButtonPress-1>', self.begin_region)
+        self.canvas.bind('<B1-Motion>', self.move_region)
+        self.canvas.bind('<ButtonRelease-1>', self.end_region)
         ttk.Label(right, textvariable=self.description, wraplength=800).pack(fill="x")
         locate = ttk.Frame(right); locate.pack(fill="x", pady=6)
         ttk.Label(locate, text="视频时间（秒）").pack(side="left")
@@ -74,8 +79,16 @@ class ReviewDialog(tk.Toplevel):
         self.apply_btn.pack(side="left")
         self.reset_btn = ttk.Button(actions, text="恢复默认并重处理", command=self.reset)
         self.reset_btn.pack(side="left", padx=8)
+        self.draw_box = ttk.Combobox(actions, textvariable=self.drawing, state='readonly',
+                                    width=12, values=('浏览', '框选擦除', '框选保护'))
+        self.draw_box.pack(side='left', padx=8)
+        self.draw_box.bind('<<ComboboxSelected>>', self.choose_drawing)
+        self.undo_btn = ttk.Button(actions, text='撤销上次框选', command=self.undo_region)
+        self.undo_btn.pack(side='left')
         ttk.Label(settings, text="1.0 为默认；增大可保留更淡的笔画，也可能带回杂线。其他片段的参数不变；接缝与最终分页会重新计算。",
                   wraplength=1080).grid(row=2, column=0, columnspan=10, sticky="w", pady=(8, 0))
+        ttk.Label(settings, text='在“提取片段”上拖动框选，松开后更新 PDF；红色擦除，绿色保护，重叠时保护优先。保护仅恢复源画面有证据的笔画。',
+                  wraplength=1080).grid(row=4, column=0, columnspan=10, sticky='w', pady=(6, 0))
         self.refresh()
 
     def record(self):
@@ -88,7 +101,7 @@ class ReviewDialog(tk.Toplevel):
         report = session.summary
         self.overview.set(f"{report['pdf_pages']} 页 PDF，{report['score_rows']} 行；{len(report.get('issues', []))} 处图像疑点。"
                           "点击问题定位。红框表示核对范围，不代表已识别出缺失音符。\n"
-                          "相关谱行可能包含同一连续片段的多行，可逐行查看。临时核对数据在更换视频或关闭软件后释放。")
+                          "相关谱行可能包含同一连续片段的多行，可逐行查看。局部修改随处理缓存保留；清理缓存后不再保留。")
         self.tree.delete(*self.tree.get_children())
         self.items = {}
         for record in session.records:
@@ -121,6 +134,8 @@ class ReviewDialog(tk.Toplevel):
         self.time.set(f"{self.issue['time_seconds'] if self.issue else (segment.start+segment.end)/2:.3f}")
         self.bounds.set(f"片段 {self.selected_id}；允许采样范围 {original.start:.3f}–{original.end:.3f} 秒")
         self.description.set(self.issue["message"] if self.issue else "选择左侧疑点可显示核对范围；也可以直接调整此片段。")
+        self.drag = None
+        self.undo_btn.config(state='normal' if record.get('regions') else 'disabled')
         page = next((v["page"] for v in self.app.review.summary["source_views"] if v["segment_id"] == self.selected_id), None)
         rows = [str(i+1) for i, row in enumerate(self.app.review.summary["rows"]) if page in row.get("source_pages", [])]
         self.row_box.config(values=rows); self.row.set(rows[0] if rows else "")
@@ -185,11 +200,18 @@ class ReviewDialog(tk.Toplevel):
                          max(100, self.canvas.winfo_height()-10)/photo.height, 1)
                      if self.zoom.get() == "适应窗口" else float(self.zoom.get()[:-1])/100)
             photo = photo.resize((max(1, round(photo.width*scale)), max(1, round(photo.height*scale))), Image.Resampling.LANCZOS)
+            self.image_scale = scale
             self.photo = ImageTk.PhotoImage(photo)
             self.canvas.delete("all"); self.canvas.create_image(0, 0, image=self.photo, anchor="nw")
             if box:
                 x, y, w, h = box
                 self.canvas.create_rectangle(x*scale, y*scale, (x+w)*scale, (y+h)*scale, outline="#e14631", width=2)
+            if self.mode.get() == '提取片段':
+                for index, operation in enumerate(record.get('regions', []), 1):
+                    x, y, w, h = operation['bbox']
+                    color = '#c93636' if operation['kind'] == 'erase' else '#16804a'
+                    self.canvas.create_rectangle(x*scale, y*scale, (x+w)*scale, (y+h)*scale, outline=color, width=2)
+                    self.canvas.create_text(x*scale+3, y*scale+3, text=str(index), fill=color, anchor='nw')
             self.canvas.config(scrollregion=(0, 0, photo.width, photo.height))
         except (ValueError, OSError, cv2.error) as error:
             self.canvas.delete("all")
@@ -206,6 +228,44 @@ class ReviewDialog(tk.Toplevel):
             return
         self.app.reprocess_segment(*values)
 
+    def choose_drawing(self, _=None):
+        self.drag = None
+        if self.drawing.get() != '浏览':
+            self.mode.set('提取片段')
+        self.canvas.config(cursor='crosshair' if self.drawing.get() != '浏览' else '')
+        self.render()
+
+    def region_point(self, event):
+        h, w = self.record()['page'].shape
+        return (max(0, min(w, round(self.canvas.canvasx(event.x)/self.image_scale))),
+                max(0, min(h, round(self.canvas.canvasy(event.y)/self.image_scale))))
+
+    def begin_region(self, event):
+        if (self.app.worker and self.app.worker.is_alive()) or self.record() is None:
+            return
+        if self.mode.get() != '提取片段' or self.drawing.get() == '浏览': return
+        self.drag = self.region_point(event)
+
+    def move_region(self, event):
+        if self.drag is None: return
+        x, y = self.region_point(event); a, b = self.drag; s = self.image_scale
+        self.canvas.delete('pending-region')
+        self.canvas.create_rectangle(a*s, b*s, x*s, y*s, outline='#1467b0', width=2, tags='pending-region')
+
+    def end_region(self, event):
+        if self.drag is None: return
+        if self.mode.get() != '提取片段':
+            self.drag = None; self.canvas.delete('pending-region'); return
+        x, y = self.region_point(event); a, b = self.drag; self.drag = None
+        self.canvas.delete('pending-region')
+        if abs(x-a) < 2 or abs(y-b) < 2: return
+        kind = 'erase' if self.drawing.get() == '框选擦除' else 'protect'
+        self.app.edit_regions(self.selected_id, kind, [min(a,x), min(b,y), abs(x-a), abs(y-b)])
+
+    def undo_region(self):
+        if self.record() is not None:
+            self.app.edit_regions(self.selected_id, undo=True)
+
     def reset(self):
         record = self.record()
         if record is None:
@@ -217,8 +277,12 @@ class ReviewDialog(tk.Toplevel):
         self.apply()
 
     def busy(self, value):
-        for button in (self.apply_btn, self.reset_btn):
+        self.drag = None
+        self.draw_box.config(state='disabled' if value else 'readonly')
+        for button in (self.apply_btn, self.reset_btn, self.undo_btn):
             button.config(state="disabled" if value else "normal")
+        if not value and self.record() is not None:
+            self.undo_btn.config(state='normal' if self.record().get('regions') else 'disabled')
 
     def destroy(self):
         super().destroy()
@@ -226,5 +290,5 @@ class ReviewDialog(tk.Toplevel):
         # objects here on the UI thread rather than during that worker's GC.
         self.photo = None
         for name in ("mode", "zoom", "start", "end", "polarity", "gain", "time",
-                     "row", "description", "bounds", "overview"):
+                     "row", "description", "bounds", "overview", "drawing"):
             setattr(self, name, None)

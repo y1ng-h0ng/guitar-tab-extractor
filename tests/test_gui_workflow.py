@@ -191,6 +191,17 @@ class GuiWorkflowTests(unittest.TestCase):
         with patch.object(self.app, 'reprocess_segment') as process:
             win.gain.set('1.4'); win.apply_btn.invoke()
             process.assert_called_once_with(1, 0., 1., 'bright', 1.4)
+        win.drawing.set('框选擦除'); win.choose_drawing()
+        win.image_scale = 2.
+        with patch.object(self.app, 'edit_regions') as edit:
+            win.begin_region(SimpleNamespace(x=20,y=40))
+            win.end_region(SimpleNamespace(x=100,y=120))
+            edit.assert_called_once_with(1,'erase',[10,20,40,40])
+            edit.reset_mock(); win.undo_region()
+            edit.assert_called_once_with(1,undo=True)
+        win.busy(True)
+        self.assertEqual(str(win.draw_box['state']),'disabled')
+        win.busy(False)
         self.app.close_review()
         self.assertFalse(self.app.review.records)
         self.assertIsNone(self.app.review.summary)

@@ -375,6 +375,16 @@ class App:
         self.review_window = None
         self.review.close()
 
+    def edit_regions(self, segment_id, kind=None, bbox=None, undo=False):
+        if self.worker and self.worker.is_alive(): return
+        self.status.set('正在应用局部框选并更新 PDF ...')
+        def task():
+            summary = self.review.edit_regions(segment_id, kind, bbox, undo,
+                cancel_event=self.cancel_event, log=lambda msg: self.events.put(('log', msg)),
+                progress_cb=lambda pct, msg: self.events.put(('progress', (pct, msg))))
+            self.events.put(('done', summary))
+        self.launch(task)
+
     def poll(self):
         try:
             while True:

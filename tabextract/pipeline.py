@@ -15,7 +15,9 @@ from .stitch import assemble_score, stack_rows
 from .pdfout import export_rows
 from .support import check_cancel, parse_bars_per_row, validate_options, write_image, time_bounds
 from .review import build_issues
-from .cache import fingerprint, digest
+from .cache import fingerprint, digest, assembly_name
+from .recovery import recover_page, recover_bridge
+from .regions import apply_regions
 
 
 def inspect_video(video_path, region=None, cancel_event=None, time_range=None):
@@ -189,9 +191,12 @@ def _run_pipeline(
     for i, segment in enumerate(segments):
         check_cancel(cancel_event)
         cached_record = (overrides.get(i+1) or _checkpoint.load(f'record-{i+1}')) if _checkpoint else None
+        legacy = cached_record if cached_record is not None and 'base_page' not in cached_record else None
         if _edit is not None and i+1 != _edit["id"]:
             record = review_session.records[i]
-        elif cached_record is not None:
+        elif _edit is not None and 'replacement' in _edit:
+            record = _edit['replacement']
+        elif cached_record is not None and legacy is None:
             record = cached_record
             log(f'复用片段 {i+1} 的提取结果。')
         else:
@@ -199,24 +204,43 @@ def _run_pipeline(
             selected_polarity = actual_polarity if _edit is None else _edit["polarity"]
             gain = 1.0 if _edit is None else _edit["detail_gain"]
             segment = segment if _edit is None else _edit["segment"]
+            if legacy is not None:
+                selected_polarity, gain, segment = legacy['polarity'], legacy['detail_gain'], legacy['segment']
+                log(f'升级片段 {i+1} 的可撤销编辑数据，保留已有局部参数。')
             frames = load_segment_frames(source, region, segment, cancel_event=cancel_event)
             effective_polarity = selected_polarity
             if effective_polarity == "auto":
                 votes = [infer_polarity(frames[j]) for j in (0, len(frames)//2, len(frames)-1)]
                 effective_polarity = max(set(votes), key=votes.count)
-            diagnostics = []
+            diagnostics, evidence = [], {}
             page = clean_frames(frames, effective_polarity, cancel_event=cancel_event,
-                                detail_gain=gain, diagnostics=diagnostics)
+                                detail_gain=gain, diagnostics=diagnostics, evidence_out=evidence)
+            evidence_page = evidence.get('page', page)
+            recovery = None
+            if _edit is None and not (legacy and legacy['revision']):
+                page, evidence_page, diagnostics, recovery = recover_page(
+                    page, evidence_page, frames, effective_polarity, gain, diagnostics,
+                    lambda: load_segment_frames(source, region, segment, count=45, cancel_event=cancel_event),
+                    cancel_event, log)
+            regions = [] if _edit is None else review_session.records[i].get('regions', [])
             record = {"id": i+1, "original": original, "segment": segment,
                       "page": page, "raw": frames[len(frames)//2], "samples": len(frames),
+                      "base_page": page, "evidence_page": evidence_page, "regions": regions,
+                      "recovery": recovery,
                       "polarity": selected_polarity, "detail_gain": gain,
                       "effective_polarity": effective_polarity,
-                      "revision": 0 if _edit is None else _edit["revision"],
+                      "revision": legacy['revision']+1 if legacy else (0 if _edit is None else _edit["revision"]),
                       "diagnostics": diagnostics, "valid": bool(staff_groups(page))}
+            if regions:
+                record['page'] = apply_regions(page, [(record, 0, 0)])
+                record['valid'] = bool(staff_groups(record['page']))
             if _edit is not None and not record["valid"]:
                 raise RuntimeError("此局部设置未提取到有效六线谱，原片段和 PDF 已保留；请调整采样时间或颜色模式")
             if _checkpoint:
                 _checkpoint.save(f'record-{i+1}', record)
+                if legacy and i+1 in overrides:
+                    overrides[i+1] = record
+                    _checkpoint.save('overrides', overrides)
         records.append(record)
         segment, page = record["segment"], record["page"]
         if not record["valid"]:
@@ -226,7 +250,7 @@ def _run_pipeline(
                 write_image(debug / f"skipped_{i + 1:02}_clean.png", page)
             log(f"跳过 {segment.start:.2f}–{segment.end:.2f} 秒：未见有效六线谱")
             continue
-        pages.append(page)
+        pages.append(record.get('base_page', page))
         info = {
             "page": len(pages),
             "start_seconds": segment.start,
@@ -272,6 +296,11 @@ def _run_pipeline(
             pa, sample_fps, cancel_event,
             detail_gain=(a["detail_gain"]+b["detail_gain"])/2,
         )
+        if pa == pb and _edit is None:
+            bridge = recover_bridge(previous, current, bridge,
+                lambda: make_scroll_bridge(source, region, a['original'], b['original'], pa,
+                    max(.5, sample_fps/2), cancel_event,
+                    detail_gain=(a['detail_gain']+b['detail_gain'])/2), cancel_event, log)
         bridge_cache[key] = bridge
         if _checkpoint:
             _checkpoint.save(cache_name, {'value': bridge})
@@ -281,10 +310,11 @@ def _run_pipeline(
 
     log("自动分行：按小节宽度与连线安排每行数量，并统一行宽。" if bars_per_row is None
         else f"自定义分行：每行目标 {bars_per_row} 小节，并统一行宽。")
-    assembly_key = 'assembly-' + digest([(r['id'], r['revision']) for r in records])
+    assembly_key = assembly_name(records)
     result = assemble_score(pages, bars_per_row, log, cancel_event, bridge_provider,
         preassembled=_checkpoint.load(assembly_key) if _checkpoint else None,
-        save_assembly=(lambda value: _checkpoint.save(assembly_key, value)) if _checkpoint else None)
+        save_assembly=(lambda value: _checkpoint.save(assembly_key, value)) if _checkpoint else None,
+        page_records=[r for r in records if r['valid']])
     issues = build_issues(records, result.joins, result.row_info)
     for item in result.joins:
         if "to_page" in item:
@@ -320,6 +350,8 @@ def _run_pipeline(
         "source_video": source.name,
         "source_url": source_url,
         "time_range": time_range,
+        "recovery": [{"segment_id": r['id'], **r['recovery']} for r in records if r.get('recovery')],
+        "region_edits": [{"segment_id": r['id'], "operations": r.get('regions', [])} for r in records if r.get('regions')],
         "region": list(region),
         "region_confidence": confidence,
         "manual_region": manual,

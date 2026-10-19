@@ -10,6 +10,7 @@ import numpy as np
 from .geometry import staff_groups, bar_lines, trim_vertical
 from .support import check_cancel, parse_bars_per_row
 from .background import remove_motion_background
+from .regions import apply_regions
 from .rowlayout import (crossing_marks, choose_breaks, choose_auto_breaks,
                         borrow_measure, compact_row, justify_row)
 
@@ -179,11 +180,16 @@ def _tracked_match(previous, current, lines, expected_shift):
     return best, seam
 
 
-def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
+def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None, page_records=None):
     canvas = pages[0].copy()
     sources = [1]
     previous = pages[0]
     offset = 0
+    placements = [(0, 0)]
+    def finish():
+        result.runs.append(apply_regions(canvas, [(page_records[p], dx, 0) for p, dx in placements])
+                           if page_records else canvas)
+        result.run_sources.append(sources)
     lines = staff_groups(previous)[0]
     for i, current in enumerate(pages[1:], 1):
         check_cancel(cancel_event)
@@ -218,6 +224,7 @@ def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
                     removed += int(np.count_nonzero(clean_current > current))
                     canvas, offset = _append_at_seam(canvas, offset, middle, left[1])
                     canvas, offset = _append_at_seam(canvas, offset, clean_current, right[1])
+                    placements.append((i, offset))
                     result.joins.append({
                         "from_page": i, "to_page": i + 1, "status": "joined_scroll",
                         **{k: v for k, v in bridge.items() if k not in ("page", "background_mask")},
@@ -238,13 +245,14 @@ def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
         if match is None:
             result.warnings.append(f"源页面 {i} → {i + 1} 的重叠未能可靠确认，已分别保留；请核对接缝。")
             result.joins.append({"from_page": i, "to_page": i + 1, "status": "unresolved"})
-            result.runs.append(canvas)
-            result.run_sources.append(sources)
+            finish()
             sources = [i+1]
             canvas = current.copy()
             offset = 0
+            placements = [(i, 0)]
         elif match["duplicate"]:
             sources.append(i+1)
+            placements.append((i, offset))
             result.joins.append({"from_page": i, "to_page": i + 1, "status": "same_view", **match})
             log(f"页面 {i} → {i + 1}：同一画面，无新增谱面")
             previous = current
@@ -254,23 +262,23 @@ def _horizontal_runs(pages, result, log, cancel_event, bridge_provider=None):
             if seam is None:
                 result.warnings.append(f"源页面 {i} → {i + 1} 虽有像素重叠，但未确认共同小节线，已分别保留。")
                 result.joins.append({"from_page": i, "to_page": i + 1, "status": "unresolved_bar", **match})
-                result.runs.append(canvas)
-                result.run_sources.append(sources)
+                finish()
                 sources = [i+1]
                 canvas = current.copy()
                 offset = 0
+                placements = [(i, 0)]
             else:
                 sources.append(i+1)
                 ca, cb = seam
                 canvas, offset = _append_at_seam(canvas, offset, current, seam)
+                placements.append((i, offset))
                 result.joins.append({"from_page": i, "to_page": i + 1, "status": "joined", "seam_previous": ca, "seam_current": cb, **match})
                 log(f"页面 {i} → {i + 1}：重叠 {previous.shape[1] - dx} 像素，整小节接缝，匹配 {match['overlap_score']:.3f}")
         previous = current
         groups = staff_groups(previous)
         if groups:
             lines = groups[0]
-    result.runs.append(canvas)
-    result.run_sources.append(sources)
+    finish()
 
 
 def _system_crops(page):
@@ -296,8 +304,10 @@ def _system_signature(system):
     return cv2.resize(feat[a:b], (640, 100), interpolation=cv2.INTER_AREA)
 
 
-def _vertical_runs(pages, result, log):
+def _vertical_runs(pages, result, log, page_records=None):
     previous = []
+    previous_indices = []
+    placements = {}
     for i, page in enumerate(pages):
         systems = _system_crops(page)
         sigs = [_system_signature(s) for s in systems]
@@ -308,9 +318,23 @@ def _vertical_runs(pages, result, log):
                     matched = count
                     break
             result.joins.append({"from_page": i, "to_page": i + 1, "status": "systems", "overlap_systems": matched})
-        result.runs.extend(systems[matched:])
+        indices = previous_indices[-matched:] if matched else []
+        top = 0
+        for j, system in enumerate(systems):
+            if j < matched:
+                if page_records:
+                    idx = indices[j]
+                    placements[idx].append((page_records[i], 0, -top))
+                    result.runs[idx] = apply_regions(result.runs[idx], placements[idx])
+                    if i+1 not in result.run_sources[idx]: result.run_sources[idx].append(i+1)
+            else:
+                indices.append(len(result.runs))
+                if page_records: placements[len(result.runs)] = [(page_records[i], 0, -top)]
+                result.runs.append(apply_regions(system, [(page_records[i], 0, -top)]) if page_records else system)
+            top += system.shape[0]
         result.run_sources.extend([[i+1] for _ in systems[matched:]])
         previous = sigs
+        previous_indices = indices
         log(f"页面 {i + 1}：{len(systems)} 个谱表，页首重叠 {matched} 个")
 
 
@@ -353,7 +377,7 @@ def _measure_units(image, result, run_index):
 
 
 def assemble_score(pages, bars_per_row=None, log=print, cancel_event=None,
-                   bridge_provider=None, preassembled=None, save_assembly=None):
+                   bridge_provider=None, preassembled=None, save_assembly=None, page_records=None):
     if not pages:
         raise ValueError("没有可拼接的谱面")
     bars_per_row = parse_bars_per_row(bars_per_row)
@@ -361,9 +385,9 @@ def assemble_score(pages, bars_per_row=None, log=print, cancel_event=None,
     if preassembled:
         log('复用已完成的拼接结果，仅重新排版。')
     elif all(len(staff_groups(p)) == 1 for p in pages):
-        _horizontal_runs(pages, result, log, cancel_event, bridge_provider)
+        _horizontal_runs(pages, result, log, cancel_event, bridge_provider, page_records)
     else:
-        _vertical_runs(pages, result, log)
+        _vertical_runs(pages, result, log, page_records)
     # Layout reads runs, but appends warnings and annotates joins. Snapshot the
     # mutable metadata now so future reflows do not accumulate layout warnings.
     result.stitch_state = dict(runs=result.runs, run_sources=result.run_sources,

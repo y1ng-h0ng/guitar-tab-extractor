@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "annotation_basis": "2026-10-19 人工查看源视频原始裁图，框选可见数字、技巧文字、符干和非乐谱干扰；不是 OCR 音符真值。坐标均为原始 ROI 像素。",
+  "cases": [
+    {"id":"mujika", "file":"無路矢.mp4", "sha256":"95b87ac24379aa3b911b481a6602aab78e8c8f97c5f4648818209c42ca726521", "region":[0,452,1280,265], "frame":900, "next_frame":1020, "seam":{"kind":"same_view", "baseline_status":"unresolved", "baseline_commit":"09dc376858ece836eeda9ffc6a9393b5f1770ecc"},
+     "marks":[{"name":"fret_7","bbox":[155,82,18,24],"min_ink":0.08,"max_ink":0.65},{"name":"Arp_label","bbox":[525,31,50,28],"min_ink":0.08,"max_ink":0.65},{"name":"stem","bbox":[57,148,8,88],"min_ink":0.16,"max_ink":0.85,"min_vertical_coverage":0.97}],
+     "noise":[{"name":"playhead_below_staff","bbox":[665,245,8,18],"max_ink":0.1}]},
+    {"id":"wiper", "file":"用不上的雨刷.mp4", "sha256":"0cb004df58bf85d16ba3466c7fb90477b98d5c89c0de2a12eac6ae966a694e0c", "region":[0,607,1280,113], "frame":750,
+     "marks":[{"name":"H","bbox":[281,31,10,11],"min_ink":0.08,"max_ink":0.8},{"name":"full","bbox":[670,18,16,12],"min_ink":0.06,"max_ink":0.8},{"name":"stem","bbox":[216,65,5,29],"min_ink":0.12,"max_ink":0.85,"min_vertical_coverage":0.9}],
+     "noise":[{"name":"playhead_tail","bbox":[919,98,5,9],"max_ink":0.2}]},
+    {"id":"summer", "file":"夏日潜行.mp4", "sha256":"63b47b66adf3e31b0b0fcb8b6f7d7a4e210c5dc21f17541fd6b2c7a9c018364e", "region":[0,602,1280,118], "frame":750,
+     "marks":[{"name":"full","bbox":[28,17,18,15],"min_ink":0.06,"max_ink":0.8},{"name":"circled_15","bbox":[778,41,22,22],"min_ink":0.08,"max_ink":0.8},{"name":"stem","bbox":[56,64,6,33],"min_ink":0.12,"max_ink":0.85,"min_vertical_coverage":0.9}],
+     "noise":[{"name":"orange_cursor_tail","bbox":[191,85,6,28],"max_ink":0.1}]},
+    {"id":"moudu", "file":"猛独侵袭.mp4", "sha256":"6dbf0d42af0a6d62a7915da87f561be3e496f65bed3b9705436ddbc91de4bfb1", "region":[0,447,1280,265], "frame":900, "next_frame":1020,
+     "seam":{"kind":"verified_scroll", "expected_shift":1323,"tolerance":25,
+       "annotation":"原图小节线20/21/22/23约位于154/489/825/1162，后图24/25约位于175/509；等宽小节位置推定位移约1320像素，禁止将反复出现的5/3误认成更短重叠。",
+       "fps":30.000080688759247,"segments":[[875,1000],[1010,1185]]},
+     "marks":[{"name":"fret_2","bbox":[176,157,18,24],"min_ink":0.08,"max_ink":0.8},{"name":"fret_0","bbox":[176,179,18,24],"min_ink":0.08,"max_ink":0.8},{"name":"stem","bbox":[182,204,8,29],"min_ink":0.16,"max_ink":0.9,"min_vertical_coverage":0.97}],
+     "noise":[{"name":"decorative_dotted_separator","bbox":[2,40,1200,13],"max_ink":0.3}]}
+  ]
+}

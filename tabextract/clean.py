@@ -186,7 +186,7 @@ def _covered_percentiles(features, offsets, upscale, minimum=3):
 
 
 def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None,
-                 horizontal_offsets=None, detail_gain=1.0, diagnostics=None):
+                 horizontal_offsets=None, detail_gain=1.0, diagnostics=None, evidence_out=None):
     if not np.isfinite(detail_gain) or not 0.5 <= detail_gain <= 2.0:
         raise ValueError("局部细节保留系数需要在 0.5–2.0 之间")
     if not frames:
@@ -265,6 +265,8 @@ def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None,
         _restore_stem_evidence(page, low, median, high, groups, upscale)
         _restore_compact_evidence(page, median, high, groups)
         _sharpen_annotations(page, median, high, groups, upscale)
+        if evidence_out is not None:
+            evidence_out['page'] = page.copy()
         # Remove detached scenery far from all staff systems. Components touching
         # the notation envelope are kept WHOLE, even when stems extend below it.
         zone = np.zeros(page.shape[0], bool)
@@ -282,6 +284,8 @@ def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None,
             h = stats[i, cv2.CC_STAT_HEIGHT]
             keep[i] = zone[y : y + h].any()
         page[~keep[labels]] = 255
+    if evidence_out is not None and 'page' not in evidence_out:
+        evidence_out['page'] = page.copy()
     if diagnostics is not None:
         diagnostics.extend(detail_issues(page, median, high, groups, upscale))
     return page

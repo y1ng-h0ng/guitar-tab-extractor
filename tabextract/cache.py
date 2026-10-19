@@ -23,6 +23,12 @@ def digest(value):
                                     separators=(',', ':')).encode()).hexdigest()
 
 
+def assembly_name(records):
+    # A 128-bit revision key avoids exceeding Windows' path limit inside an
+    # already fingerprinted job directory, without changing older job identities.
+    return 'assembly-v2-' + digest([(r['id'], r['revision']) for r in records])[:32]
+
+
 def fingerprint(path, cancel_event=None):
     h = hashlib.sha256()
     with open(path, 'rb') as stream:
