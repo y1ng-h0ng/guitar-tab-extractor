@@ -152,6 +152,37 @@ class CacheTests(unittest.TestCase):
                 self.assertGreaterEqual(ranged[0].start, 2)
                 self.assertLess(ranged[-1].end, 4)
 
+    def test_cleaner_upgrade_keeps_rectangles_and_manual_settings(self):
+        from tabextract.clean import CLEAN_VERSION
+        _, _, load, _ = self.patch_pipeline()
+        session = ReviewSession()
+        self.run_score(review_session=session)
+        session.reprocess(2,2.1,2.9,'bright',1.3,log=lambda _:None)
+        session.edit_regions(2,'erase',[265,260,65,60],log=lambda _:None)
+        operations = session.records[1]['regions']
+        revision = session.records[1]['revision']
+        with self.cache.job(session.cache_identity) as checkpoint:
+            overrides = checkpoint.load('overrides')
+            overrides[2]['clean_version'] = CLEAN_VERSION-1
+            checkpoint.save('overrides',overrides)
+        load.reset_mock()
+        restarted = ReviewSession()
+        self.run_score(review_session=restarted)
+        load.assert_called_once()
+        record = restarted.records[1]
+        self.assertEqual(record['detail_gain'],1.3)
+        self.assertEqual((record['segment'].first,record['segment'].last),(21,29))
+        self.assertEqual(record['regions'],operations)
+        self.assertEqual(record['revision'],revision+1)
+        self.assertEqual(record['clean_version'],CLEAN_VERSION)
+        self.assertTrue((record['page'][260:320,265:330] == 255).all())
+        load.reset_mock()
+        self.run_score()
+        load.assert_not_called()
+        restarted.edit_regions(2,undo=True,log=lambda _:None)
+        self.assertFalse(restarted.records[1]['regions'])
+        np.testing.assert_array_equal(restarted.records[1]['page'],record['base_page'])
+
     def test_time_validation(self):
         self.assertEqual(time_bounds(('1:02.5', '2:00'), 180), (62.5, 120))
         for values in ((-1, 2), (2, 1), ('nan', ''), ('1:80', ''), (0, 999)):

@@ -1,7 +1,7 @@
 """Bounded local retries; accept only improvements supported by source frames."""
 import cv2
 import numpy as np
-from .clean import clean_frames, observed_staff, stroke_response
+from .clean import clean_frames, observed_staff, stroke_response, notation_response
 from .geometry import staff_groups
 from .pages import signature
 from .support import check_cancel
@@ -11,7 +11,7 @@ def evidence_metrics(page, frames, polarity):
     h, w = frames[0].shape[:2]
     small = cv2.resize(page, (w, h), interpolation=cv2.INTER_AREA)
     sample = frames[::max(1, len(frames)//9)][:9]
-    evidence = np.median([stroke_response(f, polarity, 5) for f in sample], axis=0)
+    evidence = np.median([notation_response(f, polarity, 5) for f in sample], axis=0)
     groups = observed_staff(sample[len(sample)//2], polarity)
     zone = np.zeros((h, w), bool)
     for lines in groups:

@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from .region import detect_tab_region
 from .pages import scan_segments, load_segment_frames
-from .clean import clean_frames, infer_polarity
+from .clean import clean_frames, infer_polarity, CLEAN_VERSION
 from .scroll import make_scroll_bridge
 from .geometry import staff_groups
 from .stitch import assemble_score, stack_rows
@@ -191,7 +191,8 @@ def _run_pipeline(
     for i, segment in enumerate(segments):
         check_cancel(cancel_event)
         cached_record = (overrides.get(i+1) or _checkpoint.load(f'record-{i+1}')) if _checkpoint else None
-        legacy = cached_record if cached_record is not None and 'base_page' not in cached_record else None
+        legacy = cached_record if cached_record is not None and (
+            'base_page' not in cached_record or cached_record.get('clean_version') != CLEAN_VERSION) else None
         if _edit is not None and i+1 != _edit["id"]:
             record = review_session.records[i]
         elif _edit is not None and 'replacement' in _edit:
@@ -206,7 +207,7 @@ def _run_pipeline(
             segment = segment if _edit is None else _edit["segment"]
             if legacy is not None:
                 selected_polarity, gain, segment = legacy['polarity'], legacy['detail_gain'], legacy['segment']
-                log(f'升级片段 {i+1} 的可撤销编辑数据，保留已有局部参数。')
+                log(f'升级片段 {i+1} 的清洗结果，保留已有局部参数和框选。')
             frames = load_segment_frames(source, region, segment, cancel_event=cancel_event)
             effective_polarity = selected_polarity
             if effective_polarity == "auto":
@@ -223,10 +224,13 @@ def _run_pipeline(
                     lambda: load_segment_frames(source, region, segment, count=45, cancel_event=cancel_event),
                     cancel_event, log)
             regions = [] if _edit is None else review_session.records[i].get('regions', [])
+            if legacy is not None:
+                regions = legacy.get('regions', [])
             record = {"id": i+1, "original": original, "segment": segment,
                       "page": page, "raw": frames[len(frames)//2], "samples": len(frames),
                       "base_page": page, "evidence_page": evidence_page, "regions": regions,
                       "recovery": recovery,
+                      "clean_version": CLEAN_VERSION,
                       "polarity": selected_polarity, "detail_gain": gain,
                       "effective_polarity": effective_polarity,
                       "revision": legacy['revision']+1 if legacy else (0 if _edit is None else _edit["revision"]),

@@ -8,6 +8,8 @@ import numpy as np
 from .geometry import staff_groups
 from .support import check_cancel
 
+CLEAN_VERSION = 2
+
 
 def stroke_response(bgr, polarity="bright", kernel=9):
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -56,6 +58,35 @@ def observed_staff(bgr, polarity):
             np.where(response >= 15, 0, 255).astype(np.uint8), coverage=0.40
         )
     return groups or staff_groups(strong, coverage=0.18)
+
+
+def notation_response(bgr, polarity, kernel=9, groups=None, upscale=1):
+    """Admit very dark strokes only where the observed staff is also faint.
+
+    The low-light locator must see translucent strings, but its permissive
+    response also sees guitar texture. On a bright score that texture must not
+    seed fragments or darken the fringe of real fret digits.
+    """
+    response = stroke_response(bgr, polarity, kernel)
+    neutral = bgr.min(axis=2) if polarity == 'bright' else 255-bgr.max(axis=2)
+    groups = observed_staff(bgr, polarity) if groups is None else groups
+    faint = np.zeros(response.shape, bool)
+    for index, lines in enumerate(groups):
+        support = np.zeros(response.shape[1], np.uint8)
+        for line in lines:
+            y = round(line)
+            a, b = max(0, y-upscale), min(response.shape[0], y+upscale+1)
+            if b > a:
+                support += ((neutral[a:b].max(axis=0) < 50) &
+                            (response[a:b].max(axis=0) >= 8)).astype(np.uint8)
+        # Four independently observed strings must agree. A source gap in one
+        # string is allowed, but a dark background column alone is not evidence.
+        columns = support >= 4
+        top = 0 if index == 0 else round((groups[index-1][-1]+lines[0])/2)
+        bottom = response.shape[0] if index+1 == len(groups) else round((lines[-1]+groups[index+1][0])/2)
+        faint[top:bottom] |= columns
+    response[(neutral < 50) & ~faint] = 0
+    return response
 
 
 def _restore_stem_evidence(page, low, median, high, groups, upscale):
@@ -216,7 +247,8 @@ def clean_frames(frames, polarity="auto", upscale=3, cancel_event=None,
         image = cv2.resize(
             frame, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC
         )
-        feature = stroke_response(image, polarity, kernel=kernel)
+        feature = notation_response(image, polarity, kernel=kernel,
+            groups=[(lines+.5)*upscale-.5 for lines in source_groups], upscale=upscale)
         if horizontal_offsets is not None:
             matrix = np.float32([[1, 0, horizontal_offsets[index] * upscale], [0, 1, 0]])
             feature = cv2.warpAffine(feature, matrix, feature.shape[::-1],

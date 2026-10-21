@@ -16,7 +16,7 @@ from .regions import apply_regions
 from .recovery import recover_page
 from .stitch import assemble_score
 from .scroll import make_scroll_bridge
-from .pages import Segment
+from .pages import Segment, load_segment_frames
 from .support import write_image
 
 
@@ -59,12 +59,18 @@ def run_benchmark(video_dir, output_dir, manifest=None):
         path = Path(video_dir)/case['file']
         if not path.is_file(): raise FileNotFoundError(f'缺少真实视频：{path}')
         if fingerprint(path) != case['sha256']: raise ValueError(f'视频指纹不符：{path}')
-        frames = read_samples(path, case['region'], case['frame'])
+        if case.get('sample_segment'):
+            segment = Segment(*case['sample_segment'])
+            frames = load_segment_frames(path, case['region'], segment)
+            load_more = lambda: load_segment_frames(path, case['region'], segment, count=45)
+        else:
+            frames = read_samples(path, case['region'], case['frame'])
+            load_more = lambda: read_samples(path, case['region'], case['frame'], 13)
         diagnostics, evidence = [], {}
         base = clean_frames(frames, diagnostics=diagnostics, evidence_out=evidence)
         # The source cases have light notation over footage.
         page, reference, issues, recovery = recover_page(base, evidence['page'], frames,
-            'bright', 1., diagnostics, lambda: read_samples(path, case['region'], case['frame'], 13))
+            'bright', 1., diagnostics, load_more)
         values, failures = check_marks(page, case)
         if not staff_groups(page): failures.append('missing_staff')
         seam = None
@@ -114,6 +120,7 @@ def run_benchmark(video_dir, output_dir, manifest=None):
         write_image(output/(case['id']+'-clean.png'), page)
         write_image(output/(case['id']+'-edited.png'), edited)
         reports.append(dict(id=case['id'], source_sha256=case['sha256'], frame=case['frame'],
+            sample_segment=case.get('sample_segment'),
             checks=values, seam=seam, recovery=recovery, failures=failures, known_issues=known_issues))
         print(f"{case['id']}: {'PASS' if not failures else 'FAIL '+', '.join(failures)}", flush=True)
     report = {'passed': all(not r['failures'] for r in reports), 'cases': reports,

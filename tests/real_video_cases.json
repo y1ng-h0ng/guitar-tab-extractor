@@ -1,7 +1,10 @@
 {
   "schema": 1,
-  "annotation_basis": "2026-10-19 人工查看源视频原始裁图，框选可见数字、技巧文字、符干和非乐谱干扰；不是 OCR 音符真值。坐标均为原始 ROI 像素。",
+  "annotation_basis": "2026-10-19 人工查看源视频原始裁图，框选可见数字、技巧文字、符干和非乐谱干扰；2026-10-21 增加夏日潜行完整首片段，检查暗背景被误加黑。不是 OCR 音符真值。坐标均为原始 ROI 像素。",
   "cases": [
+    {"id":"summer_opening", "file":"夏日潜行.mp4", "sha256":"63b47b66adf3e31b0b0fcb8b6f7d7a4e210c5dc21f17541fd6b2c7a9c018364e", "region":[0,602,1280,118], "frame":198, "sample_segment":[0,396,25],
+     "marks":[{"name":"opening_fret_pair","bbox":[134,67,25,18],"min_ink":0.25,"max_ink":0.45},{"name":"opening_beam","bbox":[134,83,25,15],"min_ink":0.25,"max_ink":0.4},{"name":"tempo","bbox":[78,25,38,16],"min_ink":0.15,"max_ink":0.28},{"name":"rest","bbox":[163,49,13,20],"min_ink":0.35,"max_ink":0.55}],
+     "noise":[{"name":"dark_wire_above_staff","bbox":[85,0,20,22],"max_ink":0.005},{"name":"dark_wire_below_staff","bbox":[85,103,20,15],"max_ink":0.005}]},
     {"id":"mujika", "file":"無路矢.mp4", "sha256":"95b87ac24379aa3b911b481a6602aab78e8c8f97c5f4648818209c42ca726521", "region":[0,452,1280,265], "frame":900, "next_frame":1020, "seam":{"kind":"same_view", "baseline_status":"unresolved", "baseline_commit":"09dc376858ece836eeda9ffc6a9393b5f1770ecc"},
      "marks":[{"name":"fret_7","bbox":[155,82,18,24],"min_ink":0.08,"max_ink":0.65},{"name":"Arp_label","bbox":[525,31,50,28],"min_ink":0.08,"max_ink":0.65},{"name":"stem","bbox":[57,148,8,88],"min_ink":0.16,"max_ink":0.85,"min_vertical_coverage":0.97}],
      "noise":[{"name":"playhead_below_staff","bbox":[665,245,8,18],"max_ink":0.1}]},
