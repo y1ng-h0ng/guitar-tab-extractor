@@ -8,7 +8,7 @@ import queue
 import re
 import signal
 import subprocess
-import sys
+from .runtime import downloader_command, linked_output_dir
 import tempfile
 import threading
 from urllib.parse import urlsplit, parse_qs, urlencode, urlunsplit
@@ -107,7 +107,7 @@ def _stop_process(proc):
 
 def _probe_json(url, flags, cancel_event):
     check_cancel(cancel_event)
-    args = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-cache-dir',
+    args = [*downloader_command(), '--ignore-config', '--no-cache-dir',
             '--no-warnings', '--no-colors', '--skip-download', '--dump-single-json',
             '--socket-timeout', '15', '--retries', '1', *flags, '--', url]
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -205,7 +205,7 @@ def default_output(source):
     url = video_url(source)
     if url:
         key = hashlib.sha256(url.encode()).hexdigest()[:8]
-        return str(Path.cwd() / 'output' / f'链接视频_{key}_吉他谱.pdf')
+        return str(linked_output_dir() / f'链接视频_{key}_吉他谱.pdf')
     return os.path.splitext(str(source))[0] + '_吉他谱.pdf'
 
 
@@ -242,7 +242,7 @@ def download_video(url, directory, cancel_event=None, log=print, progress_cb=Non
             raise ValueError('清晰度编号无效，请重新解析链接后选择')
         fmt = str(format_id)
     url, playlist_flags = _selection(url, part)
-    args = [sys.executable, '-m', 'yt_dlp', '--ignore-config', *playlist_flags,
+    args = [*downloader_command(), '--ignore-config', *playlist_flags,
             '--no-cache-dir', '--no-warnings', '--no-colors',
             '--newline', '--progress', '--no-simulate', '--socket-timeout', '15',
             '--retries', '2', '--fragment-retries', '2', '--fixup', 'never',

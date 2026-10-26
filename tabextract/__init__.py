@@ -3,4 +3,4 @@
 from .pipeline import run_pipeline
 
 __all__ = ["run_pipeline"]
-__version__ = "1.0.0"
+from .runtime import APP_VERSION as __version__

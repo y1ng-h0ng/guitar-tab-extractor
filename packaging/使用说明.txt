@@ -1,0 +1,24 @@
+吉他谱视频提取工具 1.1.0 — Windows 10/11 x64
+
+推荐安装版：双击 Setup-x64.exe，按中文向导安装。
+便携版：完整解压 Portable-x64.zip，双击文件夹内 GuitarTabExtractor.exe。
+不需要安装 Python，也不需要运行 install_windows.bat。
+请保留 tabextract-worker.exe 和 _internal 文件夹，不要只复制主程序。
+
+将视频拖入窗口，或粘贴视频链接，再点击“一键生成”。
+本地视频的 PDF 默认保存在视频旁边；也可以自己选择保存位置。
+链接视频的默认输出：%LOCALAPPDATA%\GuitarTabExtractor\output
+缓存与处理进度：%LOCALAPPDATA%\GuitarTabExtractor\cache
+安装版和便携版都使用以上当前用户目录。可在软件的“缓存管理”中清理缓存。
+源视频只在本地处理；访问视频链接需要联网。
+
+更新：退出正在运行的程序，运行新版安装包，安装到原目录即可。
+卸载：通过 Windows“已安装的应用”卸载。生成的 PDF、缓存和原视频不会被删除。
+安装版与便携版不要同时处理同一个任务，以免相互覆盖缓存或输出。
+
+此版本未购买数字签名证书，Windows 可能显示“未知发布者”。
+请核对下载来源和 SHA256SUMS.txt，不要关闭系统安全软件。
+目前支持 Windows 10 1809 及以后版本、Windows 11 的 x64 系统；不提供 macOS/Linux 安装包。
+
+源码、问题反馈：https://github.com/y1ng-h0ng/guitar-tab-extractor
+项目许可证见 LICENSE，第三方许可证见 licenses 文件夹。

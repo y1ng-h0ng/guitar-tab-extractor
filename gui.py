@@ -14,6 +14,7 @@ try:
 except ImportError as error:
     raise SystemExit("缺少图形界面依赖，请安装官方 Python（包含 Tcl/Tk）和 requirements.txt。") from error
 from tabextract import run_pipeline
+from tabextract.runtime import APP_VERSION
 from tabextract.download import VideoSource, video_url, default_output, probe_video, thumbnail_image
 from tabextract.cache import CacheStore
 from tabextract.source_ui import LinkDialog, CacheDialog, describe
@@ -87,7 +88,7 @@ class RegionDialog(tk.Toplevel):
 
 class App:
     def __init__(self, root):
-        self.root = root; root.title("吉他谱视频提取工具"); root.geometry("920x760"); root.minsize(880, 690)
+        self.root = root; root.title(f"吉他谱视频提取工具 {APP_VERSION}"); root.geometry("920x760"); root.minsize(880, 690)
         self.events = queue.Queue(); self.worker = None; self.cancel_event = threading.Event(); self.closing = False
         self.region = None; self.region_source = None; self.summary = None; self.preview_path = None
         self.cache = CacheStore()

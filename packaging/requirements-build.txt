@@ -1,0 +1,10 @@
+# Validated Windows x64 build. Use Python 3.12 with Tcl/Tk installed.
+numpy==2.5.3
+opencv-python-headless==4.14.0.94
+Pillow==12.3.0
+reportlab==4.5.1
+tkinterdnd2==0.6.3
+yt-dlp==2026.8.19
+charset-normalizer==3.5.1
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9

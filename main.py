@@ -28,7 +28,7 @@ def main(argv=None):
     parser.add_argument('--part', type=int, help='链接中的分 P 序号，从 1 开始')
     parser.add_argument('--format', dest='format_id', help='--info 返回的可用清晰度编号；默认自动')
     parser.add_argument('--info', action='store_true', help='只解析链接，列出分 P 和清晰度，不下载视频')
-    parser.add_argument('--cache-dir', help='缓存目录，默认项目内 .tabextract-cache')
+    parser.add_argument('--cache-dir', help='缓存目录；源码版默认项目内 .tabextract-cache，打包版默认当前用户 AppData')
     parser.add_argument('--no-cache', action='store_true', help='禁用持久缓存，链接下载在退出时清理')
     args = parser.parse_args(argv)
     start = time.time()

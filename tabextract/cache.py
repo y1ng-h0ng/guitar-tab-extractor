@@ -14,6 +14,7 @@ import numpy as np
 
 from .pages import Segment
 from .support import check_cancel
+from .runtime import default_cache
 
 SCHEMA = 1
 
@@ -121,7 +122,7 @@ class CacheStore:
     """Entry locks also protect live downloads from another window's cleanup."""
     def __init__(self, root=None):
         self.root = Path(root or os.environ.get('GUITAR_TAB_CACHE') or
-                         Path(__file__).resolve().parents[1] / '.tabextract-cache').resolve()
+                         default_cache()).resolve()
 
     @contextmanager
     def job(self, identity):

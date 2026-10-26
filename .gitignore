@@ -23,6 +23,8 @@ Thumbs.db
 debug_*/
 output/
 .tabextract-cache/
+build/
+dist/
 
 # Local secrets / environment
 .env
