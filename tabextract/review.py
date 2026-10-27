@@ -12,6 +12,7 @@ from .support import check_cancel
 from .cache import digest, assembly_name
 from .regions import validate_region, apply_regions
 from .geometry import staff_groups
+from .saving import signature
 
 
 class ReviewSession:
@@ -26,6 +27,7 @@ class ReviewSession:
         self.cache_store = None
         self.cache_identity = None
         self.assembly = {}
+        self.output_signatures = {}
 
     def close(self):
         self.records.clear()
@@ -35,6 +37,7 @@ class ReviewSession:
         self.summary = None
         self.cache_store = self.cache_identity = None
         self.assembly = {}
+        self.output_signatures = {}
 
     def reprocess(self, segment_id, start, end, polarity, detail_gain,
                   log=print, progress_cb=None, cancel_event=None):
@@ -96,6 +99,7 @@ class ReviewSession:
                                  if segment_id not in (key[0], key[2])}
         config = dict(self.config)
         out = Path(config.pop("out_pdf"))
+        self._check_outputs()
         report = bool(config.get("generate_report"))
         # Render into a sibling staging directory. Neither the current PDF nor
         # cached pages change on cancellation, extraction or export failure.
@@ -108,9 +112,10 @@ class ReviewSession:
             summary["report_path"] = str(out.with_suffix(".report.json")) if report else None
             targets = [(staged, out)]
             if report:
-                _save_json(staged.with_suffix(".report.json"), summary)
+                _save_json(staged.with_suffix(".report.json"), summary, overwrite=True)
                 targets.append((staged.with_suffix(".report.json"), out.with_suffix(".report.json")))
             check_cancel(cancel_event)
+            self._check_outputs()
             backups, published = {}, []
             try:
                 for index, (_, target) in enumerate(targets):
@@ -131,6 +136,7 @@ class ReviewSession:
         self.records, self.bridges = candidate.records, candidate.bridges
         self.rows, self.summary = candidate.rows, summary
         self.assembly = candidate.assembly
+        self.output_signatures = {str(target): signature(target) for _, target in targets}
         if self.cache_store and self.cache_identity:
             try:
                 with self.cache_store.job(self.cache_identity) as checkpoint:
@@ -142,6 +148,11 @@ class ReviewSession:
             except (OSError, RuntimeError, ValueError) as error:
                 log(f'PDF 已更新，但局部修正缓存保存失败：{error}。本次会话仍保留修正。')
         return summary
+
+    def _check_outputs(self):
+        for path, previous in self.output_signatures.items():
+            if signature(path) != previous:
+                raise FileExistsError(f'生成后的文件已被外部修改或替换，已停止更新：{path}。请另存为新的 PDF 后再进行局部修正。')
 
 
 def build_issues(records, joins, row_info=()):

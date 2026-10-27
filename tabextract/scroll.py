@@ -203,7 +203,7 @@ def load_scroll_frames(video_path, region, previous_segment, next_segment,
             ok, frame = cap.read()
             if not ok:
                 raise OSError(f"读取翻页帧 {index} 失败")
-            frames.append(crop_frame(frame, region))
+            frames.append(crop_frame(frame, region).copy())
         return frames, start, end
     finally:
         cap.release()

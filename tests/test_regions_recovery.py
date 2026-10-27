@@ -113,7 +113,7 @@ class RegionTransactionTests(unittest.TestCase):
             self.assertIs(self.review.records[0],untouched)
             self.assertTrue((self.review.records[1]['page'][260:320,265:330] == 255).all())
             restarted = ReviewSession()
-            pipeline.run_pipeline(self.video,self.pdf,cache_store=self.cache,review_session=restarted,log=lambda _:None)
+            pipeline.run_pipeline(self.video,self.pdf,cache_store=self.cache,review_session=restarted,log=lambda _:None,overwrite=True)
             self.assertEqual(len(restarted.records[1]['regions']),1)
             restarted.edit_regions(2,undo=True,log=lambda _:None)
             np.testing.assert_array_equal(restarted.records[1]['page'],original)

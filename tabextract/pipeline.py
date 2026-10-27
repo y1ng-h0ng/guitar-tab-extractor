@@ -60,7 +60,8 @@ def inspect_video(video_path, region=None, cancel_event=None, time_range=None):
     return (x, y, w, h), float(confidence), preview
 
 
-def _save_json(path, value):
+def _save_json(path, value, overwrite=False):
+    from .saving import publish_file
     path = Path(path)
     descriptor, tmp = tempfile.mkstemp(
         prefix=".tabextract-", suffix=".json", dir=str(path.parent)
@@ -68,7 +69,7 @@ def _save_json(path, value):
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump(value, stream, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
+        publish_file(tmp, path, overwrite)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -78,9 +79,11 @@ def run_pipeline(
     video_path, out_pdf, sample_fps=6.0, dpi=300, debug_dir=None, log=print,
     progress_cb=None, region=None, bars_per_row=None, polarity='auto',
     generate_report=False, cancel_event=None, source_url=None, review_session=None,
-    _edit=None, time_range=None, cache_store=None, source_options=None,
+    _edit=None, time_range=None, cache_store=None, source_options=None, overwrite=False,
 ):
     options = dict(locals())
+    from .saving import check_output
+    check_output(out_pdf, generate_report, overwrite)
     options.pop('cache_store')
     time_range = time_bounds(time_range) if time_range is not None else None
     options['time_range'] = time_range
@@ -121,6 +124,7 @@ def _run_pipeline(
     time_range=None,
     _checkpoint=None,
     source_options=None,
+    overwrite=False,
 ):
     bars_per_row = parse_bars_per_row(bars_per_row)
     validate_options(sample_fps, dpi, bars_per_row)
@@ -348,6 +352,7 @@ def _run_pipeline(
         title,
         result.warnings,
         cancel_event,
+        overwrite=overwrite,
     )
     report_path = out.with_suffix(".report.json") if generate_report else None
     summary = {
@@ -388,8 +393,10 @@ def _run_pipeline(
         "note": "小节数由图像边界推定，未进行音高或节奏的语义识别；源视频未显示的内容不会补写。",
     }
     if report_path:
-        _save_json(report_path, summary)
+        _save_json(report_path, summary, overwrite=overwrite)
     if review_session is not None:
+        from .saving import output_paths, signature
+        review_session.output_signatures = {str(p): signature(p) for p in output_paths(out, generate_report)}
         if _checkpoint:
             kept = [r for r in records if r['valid']]
             for a, b in zip(kept, kept[1:]):

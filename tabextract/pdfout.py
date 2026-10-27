@@ -123,7 +123,9 @@ def layout_rows(rows, staff_spacing=21.0):
     return pages
 
 
-def export_rows(rows, out_path, dpi=300, staff_spacing=21.0, title="吉他谱", warnings=None, cancel_event=None):
+def export_rows(rows, out_path, dpi=300, staff_spacing=21.0, title="吉他谱", warnings=None, cancel_event=None, overwrite=False):
+    from .saving import check_output, publish_file
+    check_output(out_path, overwrite=overwrite)
     if not rows:
         raise ValueError("没有可导出的谱表")
     if not 72 <= dpi <= 600:
@@ -183,7 +185,7 @@ def export_rows(rows, out_path, dpi=300, staff_spacing=21.0, title="吉他谱", 
             canvas.showPage()
         canvas.save()
         check_cancel(cancel_event)
-        os.replace(tmp, out_path)
+        publish_file(tmp, out_path, overwrite)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)

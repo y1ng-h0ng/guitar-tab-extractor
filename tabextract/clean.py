@@ -11,9 +11,17 @@ from .support import check_cancel
 CLEAN_VERSION = 2
 
 
+def neutral_channel(bgr, polarity):
+    """Exact three-channel extrema using OpenCV's vectorized uint8 kernels."""
+    blue, green, red = cv2.split(bgr)
+    if polarity == 'bright':
+        return cv2.min(cv2.min(blue, green), red)
+    return 255 - cv2.max(cv2.max(blue, green), red)
+
+
 def stroke_response(bgr, polarity="bright", kernel=9):
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    neutral = bgr.min(axis=2) if polarity == "bright" else 255 - bgr.max(axis=2)
+    neutral = neutral_channel(bgr, polarity)
     if polarity == "dark":
         gray = 255 - gray
     # A pair of 1-D openings erases L/T junctions: each direction mistakes
@@ -68,7 +76,7 @@ def notation_response(bgr, polarity, kernel=9, groups=None, upscale=1):
     seed fragments or darken the fringe of real fret digits.
     """
     response = stroke_response(bgr, polarity, kernel)
-    neutral = bgr.min(axis=2) if polarity == 'bright' else 255-bgr.max(axis=2)
+    neutral = neutral_channel(bgr, polarity)
     groups = observed_staff(bgr, polarity) if groups is None else groups
     faint = np.zeros(response.shape, bool)
     for index, lines in enumerate(groups):

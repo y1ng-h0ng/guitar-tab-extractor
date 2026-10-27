@@ -38,10 +38,18 @@ def check(destination):
     writer.release()
     summary = run_pipeline(video,out/'测试谱面.pdf',region=(0,0,480,180),log=lambda _:None)
     assert (out/'测试谱面.pdf').read_bytes().startswith(b'%PDF')
+    original = (out/'测试谱面.pdf').read_bytes()
+    try:
+        run_pipeline(video,out/'测试谱面.pdf',region=(0,0,480,180),log=lambda _:None)
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError('已有 PDF 未被保护')
+    assert (out/'测试谱面.pdf').read_bytes() == original
     proc = subprocess.run([*downloader_command(),'--version'],capture_output=True,text=True,
         encoding='utf-8',timeout=60,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
     assert proc.returncode == 0, proc.stderr
     result = dict(frozen=frozen(),tk=tk_version,drag_drop=True,images=True,
-        mp4=True,tls_validation=True,pdf_pages=summary['pdf_pages'],downloader=proc.stdout.strip(),
+        mp4=True,tls_validation=True,existing_pdf_protected=True,pdf_pages=summary['pdf_pages'],downloader=proc.stdout.strip(),
         cache=str(default_cache()),linked_output=str(linked_output_dir()))
     (out/'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')

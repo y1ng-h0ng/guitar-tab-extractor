@@ -8,6 +8,7 @@ from tabextract import run_pipeline
 from tabextract.support import parse_bars_per_row, validate_options, time_bounds
 from tabextract.download import VideoSource, video_url, default_output, probe_video
 from tabextract.cache import CacheStore
+from tabextract.saving import check_output, unused_output
 import json
 
 
@@ -30,6 +31,7 @@ def main(argv=None):
     parser.add_argument('--info', action='store_true', help='只解析链接，列出分 P 和清晰度，不下载视频')
     parser.add_argument('--cache-dir', help='缓存目录；源码版默认项目内 .tabextract-cache，打包版默认当前用户 AppData')
     parser.add_argument('--no-cache', action='store_true', help='禁用持久缓存，链接下载在退出时清理')
+    parser.add_argument('--overwrite', action='store_true', help='明确允许覆盖指定的现有 PDF / 报告；默认保留原文件')
     args = parser.parse_args(argv)
     start = time.time()
     cache = None if args.no_cache else CacheStore(args.cache_dir)
@@ -50,6 +52,9 @@ def main(argv=None):
             info.pop('_listing', None)
             print(json.dumps(info, ensure_ascii=False, indent=2))
             return 0
+        if not args.output and not args.overwrite:
+            out = unused_output(out, args.report)
+        check_output(out, args.report, args.overwrite)
         source_options = dict(part=args.part, format_id=args.format_id)
         local = source.resolve(args.video, **source_options) if url else args.video
         summary = run_pipeline(
@@ -66,6 +71,7 @@ def main(argv=None):
             source_options=source_options if url else None,
             time_range=time_range,
             cache_store=cache,
+            overwrite=args.overwrite,
         )
     except KeyboardInterrupt:
         print("已中断", file=sys.stderr)

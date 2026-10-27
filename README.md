@@ -40,13 +40,17 @@ Guitar Tab Video Extractor 尝试把这套过程自动化，将视频中的已�
 
 ### Windows 安装版 / 便携版（无需 Python）
 
-使用 `GuitarTabExtractor-1.1.0-Setup-x64.exe`，按中文向导安装后从桌面或开始菜单打开。也可以完整解压 `GuitarTabExtractor-1.1.0-Portable-x64.zip`，双击 `GuitarTabExtractor.exe`。请保留同目录的 `tabextract-worker.exe` 和 `_internal` 文件夹。
+使用 `GuitarTabExtractor-1.1.1-Setup-x64.exe`，按中文向导安装后从桌面或开始菜单打开。也可以完整解压 `GuitarTabExtractor-1.1.1-Portable-x64.zip`，双击 `GuitarTabExtractor.exe`。请保留同目录的 `tabextract-worker.exe` 和 `_internal` 文件夹。
 
 支持 Windows 10 1809 / Windows 11 x64。运行无需安装 Python；链接下载需要联网。本地视频的 PDF 默认保存在视频旁边；链接输出保存在 `%LOCALAPPDATA%\GuitarTabExtractor\output`，缓存保存在 `%LOCALAPPDATA%\GuitarTabExtractor\cache`。可自定义 PDF 位置，并在“缓存管理”中清理缓存。安装和便携两种版本都使用当前用户的数据目录。
 
 退出程序后运行新版安装包即可覆盖更新；卸载保留已生成的 PDF、缓存及原视频。安装包目前未做数字签名，Windows 可能显示“未知发布者”；请核对下载来源和随包 SHA-256。[构建说明](packaging/README.md)提供打包步骤。
 
 ### Windows 源码运行
+
+保存保护适用于安装版、便携版和源码版：自动输出遇到同名 PDF 会添加 `(2)`、`(3)` 等编号；自定义文件名已存在时，界面会询问是否覆盖，默认否。重新分行同样遵循此规则。局部修正更新本次会话生成的文件；如果文件被其他程序修改或替换，会停止更新。命令行指定已有 `-o` 路径默认报错，只有显式添加 `--overwrite` 才允许替换；Python API 的 `run_pipeline` / `export_rows` 同样默认为不覆盖。
+
+1.1.1 优化了逐像素颜色计算与相邻视频采样的解码方式，保持原采样帧、分辨率和清洗阈值；采样只保留谱面区域，避免裁图仍占用整张视频帧的内存。在同一台机器上，《夏日潜行》前 30 秒从约 82 秒降至约 26 秒，15 张中间结果和谱行图像逐像素一致。完整 152 秒视频首次生成约 167 秒；只改每行小节数，复用缓存约 2.3 秒。此为具体样例的处理时间，不保证所有视频都达到同样速度，也不代表识别准确率得到同等提升。只改每行小节数或 DPI 时继续复用缓存，无需重新提取。
 
 1. 下载并完整解压项目，不要直接在压缩软件中运行文件。
 2. 安装 **Python 3.10+**，建议 Python 3.12，并确保安装 Tcl/Tk 和 pip。

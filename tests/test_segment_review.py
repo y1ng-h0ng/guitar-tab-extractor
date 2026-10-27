@@ -125,7 +125,7 @@ class LocalReviewTests(unittest.TestCase):
     def test_skipped_segment_can_be_recovered_without_renumbering_other_ids(self):
         self.loader.side_effect = lambda source, region, segment, **kw: [
             np.full((180, 480, 3), 15, np.uint8) if segment.first == 20 else frame(7)]*5
-        pipeline.run_pipeline(self.video, self.pdf, review_session=self.session, log=lambda _: None)
+        pipeline.run_pipeline(self.video, self.pdf, review_session=self.session, log=lambda _: None, overwrite=True)
         self.assertFalse(self.session.records[1]['valid'])
         self.assertEqual([v['segment_id'] for v in self.session.summary['source_views']], [1, 3])
         last = self.session.records[2]
@@ -137,7 +137,7 @@ class LocalReviewTests(unittest.TestCase):
 
     def test_nonadjacent_transition_is_reused(self):
         self.scanner.return_value = (self.segments+[Segment(60, 70, 10)], 'bright')
-        pipeline.run_pipeline(self.video, self.pdf, review_session=self.session, log=lambda _: None)
+        pipeline.run_pipeline(self.video, self.pdf, review_session=self.session, log=lambda _: None, overwrite=True)
         self.bridge.reset_mock()
         self.session.reprocess(2, 2.1, 2.9, 'bright', 1, log=lambda _: None)
         self.assertEqual(self.bridge.call_count, 2)

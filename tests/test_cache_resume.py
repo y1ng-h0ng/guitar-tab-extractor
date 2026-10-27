@@ -67,7 +67,7 @@ class CacheTests(unittest.TestCase):
         return mocks
 
     def run_score(self, **kwargs):
-        return pipeline.run_pipeline(self.video, self.pdf, cache_store=self.cache, log=lambda _: None, **kwargs)
+        return pipeline.run_pipeline(self.video, self.pdf, cache_store=self.cache, log=lambda _: None, overwrite=True, **kwargs)
 
     def test_resume_after_second_segment_failure_then_reflow_without_analysis(self):
         locate, scan, load, bridge = self.patch_pipeline()
@@ -177,7 +177,9 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(record['clean_version'],CLEAN_VERSION)
         self.assertTrue((record['page'][260:320,265:330] == 255).all())
         load.reset_mock()
-        self.run_score()
+        # A new export replaces the file intentionally; refresh the active
+        # session's ownership signature before allowing subsequent edits.
+        self.run_score(review_session=restarted)
         load.assert_not_called()
         restarted.edit_regions(2,undo=True,log=lambda _:None)
         self.assertFalse(restarted.records[1]['regions'])

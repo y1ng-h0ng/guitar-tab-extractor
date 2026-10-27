@@ -93,11 +93,11 @@ def recover_page(page, evidence_page, frames, polarity, gain, diagnostics, load_
     log('此片段存在图像疑点，正在增加采样并验证局部补救 ...')
     check_cancel(cancel_event)
     dense = load_more()
-    selected = sharp_stable_frames(dense, polarity)
     attempts = []
-    for label, samples, factor in [('加密采样', dense, gain),
-                                    ('稳定清晰帧', selected, min(2., gain*1.15))]:
+    for label, factor in [('加密采样', gain), ('稳定清晰帧', min(2., gain*1.15))]:
         check_cancel(cancel_event)
+        # Rank all dense frames only if the first candidate was rejected.
+        samples = dense if label == '加密采样' else sharp_stable_frames(dense, polarity)
         issues, evidence = [], {}
         candidate = clean_frames(samples, polarity, detail_gain=factor,
             diagnostics=issues, evidence_out=evidence, cancel_event=cancel_event)

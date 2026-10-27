@@ -21,17 +21,30 @@ def main():
     env['PATH'] = str(Path(env['SYSTEMROOT'])/'System32')+os.pathsep+env['SYSTEMROOT']
     env['LOCALAPPDATA'] = str(out/'profile')
 
-    def run(exe, *argv):
+    def run(exe, *argv, expected_code=0):
         result = subprocess.run([str(bundle/exe), *map(str, argv)], env=env, cwd=out,
             capture_output=True, encoding='utf-8', errors='strict', timeout=180,
             creationflags=subprocess.CREATE_NO_WINDOW)
-        if result.returncode:
+        if result.returncode != expected_code:
             raise RuntimeError(result.stdout+'\n'+result.stderr)
         return result.stdout
 
     run('GuitarTabExtractor.exe', '--smoke-test', out/'gui')
     result = json.loads((out/'gui/result.json').read_text(encoding='utf-8'))
     assert result['frozen'] and result['drag_drop'] and result['pdf_pages'] > 0
+    video = out/'gui/测试视频.mp4'
+    existing = out/'gui/测试视频_吉他谱.pdf'
+    existing.write_bytes(b'User-owned PDF sentinel')
+    run('tabextract-worker.exe', '--cli', video, '--no-cache', '--region', '0','0','480','180')
+    assert existing.read_bytes() == b'User-owned PDF sentinel'
+    assert (existing.parent/'测试视频_吉他谱 (2).pdf').read_bytes().startswith(b'%PDF')
+    run('tabextract-worker.exe', '--cli', video, '--no-cache', '-o', existing, expected_code=1)
+    assert existing.read_bytes() == b'User-owned PDF sentinel'
+    run('tabextract-worker.exe', '--cli', video, '--no-cache', '--region', '0','0','480','180',
+        '-o', existing, '--overwrite')
+    assert existing.read_bytes().startswith(b'%PDF')
+    result['automatic_name_collision'] = True
+    result['explicit_overwrite_required'] = True
     (out/'gui/watch.html').write_text(
         '<html><head><meta charset="utf-8"><title>中文吉他谱测试</title></head>'
         '<body><video src="测试视频.mp4"></video></body></html>', encoding='utf-8')

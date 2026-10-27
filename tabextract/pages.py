@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import cv2
 import numpy as np
-from .clean import infer_polarity, observed_staff, stroke_response
+from .clean import infer_polarity, observed_staff, stroke_response, neutral_channel
 from .geometry import staff_groups
 from .support import check_cancel, time_bounds
 
@@ -30,7 +30,7 @@ def crop_frame(frame, region):
 
 def signature(crop, polarity, groups=None):
     response = stroke_response(crop, polarity, kernel=5).astype(np.float32)
-    neutral = crop.min(axis=2) if polarity == "bright" else 255 - crop.max(axis=2)
+    neutral = neutral_channel(crop, polarity)
     response[neutral < 90] = 0
     response = np.maximum(response - 30, 0)
     if groups is None:
@@ -162,13 +162,26 @@ def load_segment_frames(video_path, region, segment, count=25, cancel_event=None
             .astype(int)
         )
         frames = []
+        position = 0
         for idx in indices:
             check_cancel(cancel_event)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+            # Nearby samples share a decode pass. Repeated random seeks decode
+            # the same GOP many times; retain seeks only across large gaps.
+            if (not frames and idx > 0) or idx-position > max(32, round(segment.fps*2)):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+                position = int(idx)
+            while position < idx:
+                check_cancel(cancel_event)
+                if not cap.grab():
+                    raise OSError(f"读取视频 {position / segment.fps:.2f} 秒处失败")
+                position += 1
             ok, frame = cap.read()
             if not ok:
                 raise OSError(f"读取视频 {idx / segment.fps:.2f} 秒处失败")
-            frames.append(crop_frame(frame, region))
+            # A crop view retains the entire decoded video frame. Keep only
+            # the score pixels while holding many samples for consensus.
+            frames.append(crop_frame(frame, region).copy())
+            position = int(idx)+1
         return frames
     finally:
         cap.release()

@@ -15,6 +15,7 @@ except ImportError as error:
     raise SystemExit("缺少图形界面依赖，请安装官方 Python（包含 Tcl/Tk）和 requirements.txt。") from error
 from tabextract import run_pipeline
 from tabextract.runtime import APP_VERSION
+from tabextract.saving import conflicts, unused_output
 from tabextract.download import VideoSource, video_url, default_output, probe_video, thumbnail_image
 from tabextract.cache import CacheStore
 from tabextract.source_ui import LinkDialog, CacheDialog, describe
@@ -98,6 +99,8 @@ class App:
         self.range_start = tk.StringVar(); self.range_end = tk.StringVar()
         self.review = ReviewSession(); self.review_window = None
         self.video = tk.StringVar(); self.output = tk.StringVar(); self.fps = tk.StringVar(value="6"); self.dpi = tk.StringVar(value="300"); self.bars = tk.StringVar(value="自动")
+        self.output_auto = True
+        self.output.trace_add('write', self.output_changed)
         self.color = tk.StringVar(value="自动识别"); self.debug = tk.BooleanVar(value=False); self.report = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="拖入视频或粘贴视频分享链接，点击“一键生成”。"); self.region_text = tk.StringVar(value="自动定位谱面")
         frame = ttk.Frame(root, padding=18); frame.pack(fill="both", expand=True); frame.columnconfigure(1, weight=1); frame.rowconfigure(10, weight=1)
@@ -165,16 +168,14 @@ class App:
         self.link_info.set('默认处理整段视频；只改每行小节数或 DPI 时自动复用缓存。')
         if self.link_window and self.link_window.winfo_exists():
             self.link_window.destroy()
-        try:
-            old_default = default_output(old)
-        except ValueError:
-            old_default = ""
-        if not self.output.get() or self.output.get() == old_default:
+        if not self.output.get() or self.output_auto:
             try:
-                self.output.set(default_output(current) if current else "")
+                self.output.set(unused_output(default_output(current)) if current else "")
+                self.output_auto = True
             except ValueError:
                 # Partial URLs are expected while typing; validate when starting.
                 self.output.set("")
+                self.output_auto = True
         self.summary = None
         self.open_btn.config(state="disabled"); self.report_btn.config(state="disabled")
 
@@ -210,8 +211,11 @@ class App:
             self.select_video(path)
 
     def pick_output(self):
-        path = filedialog.asksaveasfilename(title="保存 PDF", defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+        path = filedialog.asksaveasfilename(title="保存 PDF", defaultextension=".pdf", filetypes=[("PDF", "*.pdf")], confirmoverwrite=False)
         if path: self.output.set(path)
+
+    def output_changed(self, *_):
+        self.output_auto = False
 
     def reset_region(self): self.region = None; self.region_source = None; self.region_text.set("自动定位谱面")
 
@@ -334,8 +338,19 @@ class App:
         if self.worker and self.worker.is_alive(): return
         try:
             video = self.valid_video(); fps = float(self.fps.get()); dpi = int(self.dpi.get()); bars = parse_bars_per_row(self.bars.get()); validate_options(fps, dpi, bars)
-            out = self.output.get().strip() or default_output(video); self.output.set(out)
+            automatic = self.output_auto or not self.output.get().strip()
+            out = self.output.get().strip() or default_output(video)
             if Path(out).suffix.lower() != '.pdf': raise ValueError("输出文件需要使用 .pdf 扩展名")
+            overwrite = False
+            if automatic:
+                out = unused_output(default_output(video), self.report.get())
+            elif conflicts(out, self.report.get()):
+                existing = '\n'.join(str(p) for p in conflicts(out, self.report.get()))
+                if not messagebox.askyesno('确认覆盖文件', f'以下文件已存在：\n{existing}\n\n是否覆盖？选择“否”将取消本次生成，保留原文件。', default='no', parent=self.root):
+                    return
+                overwrite = True
+            self.output.set(out)
+            self.output_auto = automatic
             region = self.region if self.region_source == video else None; polarity = COLORS[self.color.get()]
             debug = str(Path(out).parent / ("debug_" + Path(out).stem)) if self.debug.get() else None
             generate_report = self.report.get()
@@ -350,7 +365,7 @@ class App:
             try:
                 self.cache.prune()
                 local = self.resolve_video(video)
-                summary = run_pipeline(local, out, sample_fps=fps, dpi=dpi, bars_per_row=bars, region=region, polarity=polarity, debug_dir=debug, generate_report=generate_report, cancel_event=self.cancel_event, log=lambda msg: self.events.put(("log", msg)), progress_cb=lambda pct, msg: self.events.put(("progress", (20 + pct * .8 if linked else pct, msg))), source_url=linked, review_session=self.review, time_range=time_range, cache_store=self.cache, source_options=source_options)
+                summary = run_pipeline(local, out, sample_fps=fps, dpi=dpi, bars_per_row=bars, region=region, polarity=polarity, debug_dir=debug, generate_report=generate_report, cancel_event=self.cancel_event, log=lambda msg: self.events.put(("log", msg)), progress_cb=lambda pct, msg: self.events.put(("progress", (20 + pct * .8 if linked else pct, msg))), source_url=linked, review_session=self.review, time_range=time_range, cache_store=self.cache, source_options=source_options, overwrite=overwrite)
             except Exception:
                 self.review.close()
                 self.source.close()
